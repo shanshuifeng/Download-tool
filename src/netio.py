@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import http.client
 import ipaddress
+import re
 import socket
 import ssl
 import struct
@@ -160,3 +161,56 @@ def _request(url: str, method="GET", headers=None, timeout=20, proxy=None):
         h.update(headers)
     req = urllib.request.Request(url, method=method, headers=h)
     return _opener(proxy).open(req, timeout=timeout)
+
+
+# ---------------- 错误翻译 ----------------
+# 放在传输层：它翻译的全是 _request 抛出来的东西，引擎只负责展示。
+
+def _probe_error_hint(url: str, exc: Exception) -> str:  # @contract CORE-006b
+    """把底层异常翻译成用户能据此行动的原因说明。"""
+    u = (url or "").lower()
+    if not u.startswith(("http://", "https://")):
+        return "链接格式不对，需要以 http:// 或 https:// 开头"
+
+    msg = str(exc)
+    low = msg.lower()
+
+    # HTTP 状态码
+    m = re.search(r"HTTP Error (\d{3})", msg)
+    if m:
+        code = int(m.group(1))
+        table = {
+            400: "服务器认为请求有误（400）",
+            401: "需要登录或授权（401），请改用带凭证的直链",
+            403: "被拒绝访问（403），多半是防盗链，请从浏览器复制真实下载链接",
+            404: "文件不存在（404），链接可能已失效",
+            405: "服务器不允许该请求方式（405）",
+            410: "文件已被删除（410）",
+            416: "服务器不支持当前分段请求（416）",
+            429: "请求过于频繁被限流（429），稍后再试或减少线程数",
+            500: "服务器内部错误（500）",
+            502: "网关错误（502）",
+            503: "服务暂不可用（503）",
+            504: "网关超时（504）",
+        }
+        return table.get(code, f"服务器返回错误 {code}")
+
+    # 网络层
+    if isinstance(exc, socket.gaierror) or "getaddrinfo" in low \
+            or "name or service not known" in low:
+        return "域名解析失败，请检查域名拼写或本机 DNS"
+    if "certificate" in low or "ssl" in low:
+        return "TLS 证书校验失败，可能是证书过期或中间人代理"
+    if "timed out" in low or isinstance(exc, (socket.timeout, TimeoutError)):
+        return "连接超时，请检查网络，或把超时时间调大"
+    if ("connection refused" in low or "actively refused" in low
+            or "积极拒绝" in msg):
+        return "连接被拒绝，目标端口未开放"
+    if "reset by peer" in low or "connection reset" in low:
+        return "连接被重置，可能被中间设备阻断"
+    if "no route to host" in low or "unreachable" in low:
+        return "网络不可达，请检查网络连接"
+    if "too many redirects" in low:
+        return "重定向次数过多，链接可能有问题"
+
+    return msg or exc.__class__.__name__

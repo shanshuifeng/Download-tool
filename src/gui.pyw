@@ -348,7 +348,8 @@ class SlimScroll(tk.Canvas):
 
 # ---------------- 说明弹窗 ----------------
 HELP_ROWS = [
-    ("下载链接", "支持 http/https 直链。一行一个；贴多行会被当作同一个文件的镜像，自动测速后挑最快的用。GitHub 的 release 链接会自动补 3 个加速源。", "必填"),
+    ("下载链接", "支持 http/https 直链。一行一个；贴多行会被当作同一个文件的镜像，"
+                 "自动测速后挑最快的用。GitHub 的 release 链接会自动补 3 个加速源。", "必填"),
     ("保存到", "填目录就沿用服务器给的文件名；填完整文件名可以改名。", "默认「下载」文件夹"),
     ("线程数", "同时下载的分片数量。家用宽带 8–16 比较合适；开太高会被服务端限速或触发风控，反而更慢。", "16"),
     ("分片大小", "每片多大。0 = 自动按文件大小均分（1–32MB）。超大文件可固定 8–16MB 降低重试成本；小文件建议留自动。", "自动"),
@@ -356,7 +357,8 @@ HELP_ROWS = [
     ("慢速时长", "速度要持续低于阈值多久才判定为慢链。设太短会频繁重连，设太长会白等。", "12 秒"),
     ("重试次数", "单片失败后换镜像重试的次数。网络差可以调大，镜像多时也建议调大。", "6 次"),
     ("连接超时", "单次请求多久没响应就放弃。跨境线路慢可以调到 45–60 秒。", "30 秒"),
-    ("SHA256", "服务器公布的校验值（sha1/md5 也能自动识别）。留空则只核对文件大小。", "可留空"),
+    ("SHA256", "服务器公布的校验值（sha1/md5 也能自动识别）。留空则只核对文件大小；"
+               "经镜像下载时强烈建议填写——镜像只保证连通，不保证内容。", "可留空"),
     ("额外镜像", "逗号分隔的镜像前缀，会拼在链接前面。例如 https://ghfast.top/", "可留空"),
 ]
 
@@ -465,6 +467,7 @@ class App:
         self.rows = {}
         self._clip_seen = ""
         self._list_shown = False
+        self._clear_shown = False
         self.queue = DownloadQueue(
             concurrent=int(self.cfg.get("concurrent", 2)),
             on_event=lambda kind, tid, **kw: self.q.put(
@@ -582,6 +585,9 @@ class App:
         self.lbl_state.pack(side="left")
         self.lbl_stat = tk.Label(stat, text="", bg=BG, fg=MUTED, font=F_MONO_S)
         self.lbl_stat.pack(side="right")
+        self.lbl_clear = tk.Label(stat, text="清除已完成", bg=BG, fg=MUTED,
+                                  font=F_SMALL, cursor="hand2")
+        self.lbl_clear.bind("<Button-1>", lambda e: self._clear_finished())
 
         self.log = tk.Text(bottom, height=2, bg=BG, fg=MUTED, relief="flat", bd=0,
                            font=F_MONO_S, wrap="word", state="disabled",
@@ -766,7 +772,17 @@ class App:
         if row and row.path and os.path.exists(row.path):
             subprocess.Popen(["explorer", "/select,", os.path.normpath(row.path)])
             return
+        if row and row.path:
+            # 文件被移走或删掉了：一次点击就把整行静默抹掉，用户会以为还能打开
+            messagebox.showinfo(
+                "文件不在了",
+                f"找不到这个文件：\n{row.path}\n\n可以再点一次按钮，把它从列表里移除。")
+            row.path = None
+            row.stat.config(text="完成（文件已不在）", fg=MUTED)
+            row.btn.set_text("移除")
+            return
         if row:
+            self.queue.forget(tid)
             row.destroy()
             self.rows.pop(tid, None)
             if not self.rows and self._list_shown:
@@ -775,6 +791,19 @@ class App:
             self._fit_list()
             self._fit_height()
             self._refresh_bottom()
+
+    def _clear_finished(self):
+        """把已结束的任务从列表与统计里一起摘掉，底部汇总才能真正复位。"""
+        for tid in list(self.rows):
+            if self.queue.state_of(tid) in ("done", "failed", "cancelled"):
+                self.queue.forget(tid)
+                self.rows.pop(tid).destroy()
+        if not self.rows and self._list_shown:
+            self.listwrap.pack_forget()
+            self._list_shown = False
+        self._fit_list()
+        self._fit_height()
+        self._refresh_bottom()
 
     def _on_task(self, kind, tid, kw):
         row = self.rows.get(tid)
@@ -824,6 +853,13 @@ class App:
 
     def _refresh_bottom(self):
         s = self.queue.stats()
+        finished = s["done"] + s["failed"] + s["cancelled"]
+        if finished and not self._clear_shown:
+            self.lbl_clear.pack(side="right", padx=(0, S(14)))
+            self._clear_shown = True
+        elif not finished and self._clear_shown:
+            self.lbl_clear.pack_forget()
+            self._clear_shown = False
         if not s["total"]:
             self.lbl_state.config(text="就绪", fg=MUTED)
             self.lbl_stat.config(text="")

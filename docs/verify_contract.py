@@ -360,7 +360,10 @@ DISPATCH = {
 def check_anchors():
     ids = defined_ids()
     anchors: dict[str, list[str]] = {}
-    for f in list(ROOT.glob("*.py")) + list(ROOT.glob("*.pyw")):
+    files = list(ROOT.glob("*.py")) + list(ROOT.glob("*.pyw"))
+    # v1.6 把源码收进 src/ 后这里还在扫根目录，锚点检查整整空转了一轮
+    files += list((ROOT / "src").glob("*.py")) + list((ROOT / "src").glob("*.pyw"))
+    for f in files:
         for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             for m in ANCHOR.finditer(line):
                 anchors.setdefault(m.group(1), []).append(f"{f.name}:{i}")

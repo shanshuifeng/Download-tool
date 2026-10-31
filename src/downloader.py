@@ -31,14 +31,14 @@ import queue
 import random
 import re
 import shutil
-import socket
 import sys
 import threading
 import time
 import urllib.parse
-from collections import deque
 
-from netio import UA, _opener, _request  # noqa: F401
+import diskutil
+import resume
+from netio import _opener, _probe_error_hint, _request  # noqa: F401  _opener 供测试引用
 
 # GitHub release 直连在国内基本不可用，按实测速度排序的可用镜像
 GITHUB_MIRRORS = [
@@ -105,61 +105,17 @@ class _RateLimiter:  # @contract CORE-014
             time.sleep(min(wait, 0.5))
 
 
-def _probe_error_hint(url: str, exc: Exception) -> str:  # @contract CORE-006b
-    """把底层异常翻译成用户能据此行动的原因说明。"""
-    u = (url or "").lower()
-    if not u.startswith(("http://", "https://")):
-        return "链接格式不对，需要以 http:// 或 https:// 开头"
-
-    msg = str(exc)
-    low = msg.lower()
-
-    # HTTP 状态码
-    m = re.search(r"HTTP Error (\d{3})", msg)
-    if m:
-        code = int(m.group(1))
-        table = {
-            400: "服务器认为请求有误（400）",
-            401: "需要登录或授权（401），请改用带凭证的直链",
-            403: "被拒绝访问（403），多半是防盗链，请从浏览器复制真实下载链接",
-            404: "文件不存在（404），链接可能已失效",
-            405: "服务器不允许该请求方式（405）",
-            410: "文件已被删除（410）",
-            416: "服务器不支持当前分段请求（416）",
-            429: "请求过于频繁被限流（429），稍后再试或减少线程数",
-            500: "服务器内部错误（500）",
-            502: "网关错误（502）",
-            503: "服务暂不可用（503）",
-            504: "网关超时（504）",
-        }
-        return table.get(code, f"服务器返回错误 {code}")
-
-    # 网络层
-    if isinstance(exc, socket.gaierror) or "getaddrinfo" in low or "name or service not known" in low:
-        return "域名解析失败，请检查域名拼写或本机 DNS"
-    if "certificate" in low or "ssl" in low:
-        return "TLS 证书校验失败，可能是证书过期或中间人代理"
-    if "timed out" in low or isinstance(exc, (socket.timeout, TimeoutError)):
-        return "连接超时，请检查网络，或把超时时间调大"
-    if ("connection refused" in low or "actively refused" in low
-            or "积极拒绝" in msg):
-        return "连接被拒绝，目标端口未开放"
-    if "reset by peer" in low or "connection reset" in low:
-        return "连接被重置，可能被中间设备阻断"
-    if "no route to host" in low or "unreachable" in low:
-        return "网络不可达，请检查网络连接"
-    if "too many redirects" in low:
-        return "重定向次数过多，链接可能有问题"
-
-    return msg or exc.__class__.__name__
-
-
 def human(n: float) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if abs(n) < 1024 or unit == "GB":
             return f"{n:.1f}{unit}" if unit != "B" else f"{int(n)}B"
         n /= 1024
     return f"{n:.1f}GB"
+
+
+def _write(f, buf: bytes) -> None:
+    """唯一的写盘点。抽出来是为了让「磁盘满」这条路径能被测试注入。"""
+    f.write(buf)
 
 
 def is_github_release(url: str) -> bool:
@@ -217,7 +173,9 @@ def probe(url: str, timeout=15, proxy=None):  # @contract CORE-006
             errors.append(e)
 
     err = None
-    if not size:
+    if size is None:
+        # 0 字节是合法大小，不能用真值判断——GitHub 上的 .gitkeep / 空 __init__.py
+        # 全是 Content-Length: 0（BUG-01）
         # 优先报 HTTP 状态类错误（信息量最大），否则报第一个
         http_errs = [e for e in errors if re.search(r"HTTP Error \d{3}", str(e))]
         pick = (http_errs or errors or [None])[0]
@@ -282,13 +240,22 @@ def _measure_mirror(u: str, proxy=None) -> dict:
     """单源测速：探测元信息 + 拉 256KB 量吞吐。"""
     t0 = time.time()
     info = probe(u, proxy=proxy)
-    if not info["size"]:
+    if info["size"] is None:
         return {"url": u, "info": info, "speed": 0.0, "failed": True}
+    if info["size"] == 0:
+        # 空文件没有吞吐可测，也省掉一次必然为空的请求（BUG-01）
+        return {"url": u, "info": info, "speed": 0.0}
     speed = 0.0
     try:
         with _request(u, "GET", {"Range": "bytes=0-262143"},
                       timeout=12, proxy=proxy) as r:
-            got = len(r.read())
+            # 只读固定窗口：源忽略 Range 时 r.read() 会把整个文件读进内存（BUG-17）
+            got, limit = 0, 256 * 1024
+            while got < limit:
+                buf = r.read(min(BLOCK, limit - got))
+                if not buf:
+                    break
+                got += len(buf)
         dt = time.time() - t0
         speed = got / dt if dt > 0 else 0.0
     except Exception:
@@ -410,8 +377,11 @@ class DownloadTask:
         self.mirror_speeds = []        # 与 mirrors 同序，用于加权分配
         self.etag = None               # 续传指纹（ETag / Last-Modified）
         self.size = 0
+        self.actual_hash = None        # 校验时算出的值，供 dl.py 复用（BUG-09）
+        self.hash_algo = None
         self._floor_kb = self.slow_kb  # 动态慢速下限，由 reporter 抬升
         self._no_range = False         # 有源声称支持分段却回 200
+        self._fatal = None             # 磁盘满这类不可重试错误，由 worker 抛出
 
     # ---------- 公共 ----------
     def cancel(self):
@@ -460,18 +430,36 @@ class DownloadTask:
         name = best["info"]["name"] or _fallback_name(best["info"]["url"])
         out = self.out_path or name
         if os.path.isdir(out) or not os.path.splitext(out)[1]:
-            os.makedirs(out, exist_ok=True)
+            home = out
             out = os.path.join(out, name)
+        else:
+            home = os.path.dirname(os.path.abspath(out)) or "."
         self.out_path = out
-        os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
-
-        ranges = best["info"]["ranges"]
-        self.log(f"文件大小 {human(self.size)}，分段下载：{'支持' if ranges else '不支持（退化为单线程）'}")
 
         if self.size > MAX_FILE_SIZE:
             raise DownloadError(
                 f"文件大小 {human(self.size)} 超过上限 {human(MAX_FILE_SIZE)}，已拒绝\n"
                 f"  如果确实要下这么大的文件，请用 curl/aria2 这类不限量的工具")
+
+        # 预检必须在建目录之前：路径太长、盘装不下，不该等下载完才说（BUG-06/08）
+        try:
+            tight = diskutil.check_target(out, self.size)  # @contract CORE-023
+        except diskutil.DiskError as e:
+            raise DownloadError(str(e)) from None
+        try:
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+        except OSError as e:
+            # 盘符不存在、目录只读：别把 FileNotFoundError 直接甩给用户
+            raise DownloadError(f"保存位置不可用：{home}\n  原因：{e}") from None
+        if tight:
+            self.log(tight, "warn")
+
+        ranges = best["info"]["ranges"]
+        self.log(f"文件大小 {human(self.size)}，分段下载：{'支持' if ranges else '不支持（退化为单线程）'}")
+        if len(self.mirrors) > 1 and not (self.sha256 or self.verify_hash):
+            # 镜像只保证连通，不保证内容；没法强制，至少要吵一声（BUG-07）
+            self.log("正在经镜像下载且未提供哈希，文件内容无法验证", "warn")
 
         # 同一路径只允许一个任务：并发写同一个 .parts 会互相覆盖分片
         lock = _path_lock(out)
@@ -515,6 +503,19 @@ class DownloadTask:
     def _download_single(self, url):  # @contract CORE-012
         tmp = self.out_path + ".part"
         have = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+        if have:
+            # @contract CORE-021
+            if not resume.matches(resume.load(self.out_path), self.size, self.etag):
+                # 分片路径靠 meta.json 判定能否复用；单线程只有 .part 的大小，
+                # 远端换同长度内容时会拼出既非旧也非新的文件（BUG-15）
+                self.log("续传指纹不符（文件已变化或缺少指纹），从头下载", "warn")
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                have = 0
+            elif not self.etag:
+                self.log("服务器未提供 ETag，续传无法检测同长度变更", "warn")
         with self._lock:
             self._done = have
         headers = {"Range": f"bytes={have}-"} if have else {}
@@ -530,6 +531,10 @@ class DownloadTask:
                     with self._lock:
                         self._done -= have
                     have, mode = 0, "wb"
+                if not have:
+                    # 落盘前先写指纹：写一半断电，下次也能判断这份 .part 属于谁
+                    resume.save(self.out_path, size=self.size,
+                                etag=self.etag, url=url)
                 with open(tmp, mode) as f:
                     t_last, n_last = time.time(), self._done
                     while True:
@@ -538,7 +543,7 @@ class DownloadTask:
                         buf = r.read(BLOCK)
                         if not buf:
                             break
-                        f.write(buf)
+                        _write(f, buf)
                         if self._limiter:
                             self._limiter.acquire(len(buf))
                         with self._lock:
@@ -550,11 +555,17 @@ class DownloadTask:
                             t_last, n_last = now, self._done
         except DownloadError:
             raise
+        except OSError as e:
+            if diskutil.is_disk_full(e):
+                raise DownloadError(
+                    "磁盘空间不足，下载已中止（已下载的 .part 保留）") from None
+            raise DownloadError(f"下载失败：{e}")
         except Exception as e:
             raise DownloadError(f"下载失败：{e}")
         if os.path.exists(self.out_path):
             os.remove(self.out_path)
         os.replace(tmp, self.out_path)
+        resume.clear(self.out_path)
 
     # ---------- 多线程分片 ----------
     def _download_chunked(self):
@@ -639,7 +650,7 @@ class DownloadTask:
             pending.put(i)
 
         def pump():
-            while not self._cancel.is_set():
+            while not self._cancel.is_set() and self._fatal is None:
                 try:
                     i = pending.get_nowait()
                 except queue.Empty:
@@ -654,12 +665,30 @@ class DownloadTask:
             t.join()
         self._stop.set()  # 停掉 reporter
 
+        if self._fatal:
+            raise self._fatal
         if self._errors and not self._cancel.is_set():
             raise DownloadError(f"{len(self._errors)} 个分片失败，已保留进度可重试")
 
         self.log("合并分片…")
         # 预分配输出再按偏移写入：写一片删一片，峰值磁盘 ≈ 总量 + 一片
         mode = "r+b" if os.path.exists(self.out_path) else "w+b"
+        try:
+            self._merge(chunks, parts_dir, mode)
+        except OSError as e:
+            if not diskutil.is_disk_full(e):
+                raise
+            # 保留分片，删掉半成品：留一个长度正确的空壳比没有更危险
+            try:
+                os.remove(self.out_path)
+            except OSError:
+                pass
+            raise DownloadError(
+                "磁盘空间不足，合并分片失败；已下载的分片保留，腾出空间后可重试") from None
+        shutil.rmtree(parts_dir, ignore_errors=True)
+        self.log(f"耗时 {time.time()-t0:.1f}s")
+
+    def _merge(self, chunks, parts_dir, mode):
         with open(self.out_path, mode) as out:
             out.truncate(self.size)
             for i, (start, end) in enumerate(chunks):
@@ -677,8 +706,6 @@ class DownloadTask:
                 with open(p, "rb") as f:
                     shutil.copyfileobj(f, out, 4 * 1024 * 1024)
                 os.remove(p)
-        shutil.rmtree(parts_dir, ignore_errors=True)
-        self.log(f"耗时 {time.time()-t0:.1f}s")
 
     def _worker(self, idx, start, end, parts_dir, mirror_idx=0):  # @contract CORE-011
         path = os.path.join(parts_dir, f"part{idx:04d}")
@@ -716,7 +743,7 @@ class DownloadTask:
                             buf = r.read(BLOCK)
                             if not buf:
                                 break
-                            f.write(buf)
+                            _write(f, buf)
                             got += len(buf)
                             if self._limiter:
                                 self._limiter.acquire(len(buf))
@@ -729,6 +756,11 @@ class DownloadTask:
                     if os.path.getsize(path) >= want:
                         return
             except Exception as e:
+                if diskutil.is_disk_full(e):   # @contract CORE-022
+                    # 磁盘满不是网络问题，重试只会让用户多等 30 秒（BUG-10）
+                    self._fatal = DownloadError(
+                        "磁盘空间不足，下载已中止（已下载的分片保留）")
+                    return
                 self.log(f"  分片{idx} 第{attempt+1}次失败（{e}），换源重试", "warn")
                 # 指数退避 + 抖动：避免多分片同时重连打爆服务端
                 time.sleep(_backoff(attempt))
@@ -777,6 +809,7 @@ class DownloadTask:
                     break
                 h.update(block)
         got = h.hexdigest()
+        self.actual_hash, self.hash_algo = got, algo
         if got != want:
             bad = self._quarantine("哈希不符")
             raise DownloadError(

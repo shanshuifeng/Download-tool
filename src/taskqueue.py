@@ -37,21 +37,23 @@ class DownloadQueue:  # @contract CORE-016
 
     # ---------- 对外 ----------
     def add(self, urls, out_path=None, **kw):
-        with self._lock:
-            self._seq += 1
-            tid = self._seq
-            self._state[tid] = "queued"
-            self._pending.append(tid)
+        box = {"tid": 0}
 
         def log(msg, level="info"):
-            self._event("log", tid, msg=msg, level=level)
+            self._event("log", box["tid"], msg=msg, level=level)
 
         def progress(d):
-            self._event("progress", tid, data=d)
+            self._event("progress", box["tid"], data=d)
 
+        # 先构造再登记。反过来的话，别的任务结束触发 _pump() 会在这个 tid
+        # 还没进 _tasks 时把它取走执行，_run_one 直接 KeyError，并发槽永久泄漏（BUG-16）
         task = DownloadTask(urls, out_path, log=log, progress=progress, **kw)
         with self._lock:
+            self._seq += 1
+            tid = box["tid"] = self._seq
             self._tasks[tid] = task
+            self._state[tid] = "queued"
+            self._pending.append(tid)
         self._event("state", tid, state="queued")
         self._pump()
         return tid
@@ -88,6 +90,20 @@ class DownloadQueue:  # @contract CORE-016
         with self._lock:
             return self._state.get(tid)
 
+    def forget(self, tid):
+        """把已结束的任务从统计里摘掉（GUI 删行时调用）。
+
+        只允许终态：排队中/运行中的任务必须走 cancel，不能被静默抹掉，
+        否则 _running 里的槽位会漏。
+        """
+        with self._lock:
+            if self._state.get(tid) not in ("done", "failed", "cancelled"):
+                return False
+            self._state.pop(tid, None)
+            self._tasks.pop(tid, None)
+            self._running.pop(tid, None)
+            return True
+
     # ---------- 内部 ----------
     def _pump(self):
         with self._lock:
@@ -101,7 +117,15 @@ class DownloadQueue:  # @contract CORE-016
                                  daemon=True).start()
 
     def _run_one(self, tid):
-        task = self._tasks[tid]
+        task = self._tasks.get(tid)
+        if task is None:
+            # 登记丢失属于内部错误；但不能让线程带着并发槽一起死
+            with self._lock:
+                self._running.pop(tid, None)
+                self._state[tid] = "failed"
+            self._event("state", tid, state="failed", message="任务登记丢失")
+            self._pump()
+            return
         self._event("state", tid, state="running")
         try:
             path = task.run()

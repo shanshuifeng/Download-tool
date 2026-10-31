@@ -117,6 +117,24 @@ class GuiTest(unittest.TestCase):
         app.listwrap.pack_forget()
         app._list_shown = False
 
+    def test_bug02_clear_finished(self):
+        """BUG-02 清除已完成后，行、列表与底部统计必须一起复位。"""
+        app = self.app
+        app.queue.add = lambda *a, **k: len(app.rows) + 1
+        for _ in range(2):
+            self._type_url("https://e.com/a.bin")
+            app._start()
+
+        for tid in list(app.rows):
+            app.queue._state[tid] = "done"
+        app._refresh_bottom()
+        self.assertEqual(app.queue.stats()["total"], 2)
+
+        app._clear_finished()
+        self.assertEqual(app.rows, {})
+        self.assertFalse(app._list_shown)
+        self.assertEqual(app.queue.stats()["total"], 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

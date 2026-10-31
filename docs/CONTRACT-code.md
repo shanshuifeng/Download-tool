@@ -12,7 +12,8 @@
 {
   "checks": [
     {"type": "stdlib_only",
-     "files": ["downloader.py", "netio.py", "taskqueue.py", "dl.py", "gui.pyw"]}
+     "files": ["downloader.py", "netio.py", "taskqueue.py", "dl.py", "gui.pyw",
+               "diskutil.py", "resume.py"]}
   ]
 }
 ```
@@ -24,12 +25,15 @@
 ## 2. 分层（CODE-002）
 
 ```
-gui.pyw ──┬──> downloader.py ──> netio.py
+gui.pyw ──┬──> downloader.py ──┬──> netio.py
+          │                    ├──> diskutil.py
+          │                    └──> resume.py
           └──> taskqueue.py ───> downloader.py
 dl.py ────────> downloader.py
 ```
 
 - `netio.py` 是传输层（UA、opener、代理、SOCKS5、`_request`），**不得反向依赖** `downloader`
+- `diskutil.py`（落盘预检）与 `resume.py`（续传指纹）是叶子模块，只被 `downloader` 依赖，**不得反向依赖**
 - `taskqueue.py` 是多任务调度，只依赖 `downloader`，**不得被 downloader 依赖**（否则循环导入）
 - `downloader.py` 只允许依赖 `netio`，不得依赖 `gui.pyw` / `dl.py` / `taskqueue.py`
 - `gui.pyw` / `dl.py` 不得互相 import
@@ -43,7 +47,8 @@ dl.py ────────> downloader.py
   "checks": [
     {"type": "max_lines",
      "limits": {"downloader.py": 900, "netio.py": 260, "taskqueue.py": 220,
-                "dl.py": 400, "gui.pyw": 1100}}
+                "dl.py": 400, "gui.pyw": 1100, "diskutil.py": 160,
+                "resume.py": 90}}
   ]
 }
 ```

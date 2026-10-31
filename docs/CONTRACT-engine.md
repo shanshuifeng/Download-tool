@@ -134,6 +134,7 @@ progress(d: dict)                    # d 的键固定为下表
 ```
 
 - `size` 为 None 时 `error` 必须有值，且必须是可读中文
+- `size` 为 `0` 是合法值（空文件），只有 `None` 才表示探测失败；`error` 仅在 `None` 时非空
 - 探测顺序：先 `HEAD`，拿不到 size 或缺 `Accept-Ranges` 时退化为 `Range: bytes=0-0`
 - 不得因探测失败抛异常，一律通过 `error` 字段返回
 - `etag` 取 `ETag`，缺失时退回 `Last-Modified`，仅用于续传判定（REQ-007）
@@ -145,7 +146,7 @@ progress(d: dict)                    # d 的键固定为下表
 ```contract
 {
   "checks": [
-    {"type": "error_table", "module": "downloader", "func": "_probe_error_hint",
+    {"type": "error_table", "module": "netio", "func": "_probe_error_hint",
      "codes": [400, 401, 403, 404, 405, 410, 416, 429, 500, 502, 503, 504]}
   ]
 }
@@ -171,15 +172,18 @@ progress(d: dict)                    # d 的键固定为下表
 |---|---|---|
 | CORE-009 | 动态慢速下限 | reporter 每 0.5s 更新：全局速度 `g`（KB/s）满足 `g >= slow_kb*4` 时，`_floor_kb = max(slow_kb, g*0.2)`。未达 4 倍门限不抬高，避免低速链路上误杀分片。`slow_kb=0` 时整条逻辑关闭 |
 | CORE-011 | 分段路径的 200 保护 | 只有「该分片覆盖整个文件且 `have==0`」才接受 200；否则置 `_no_range=True` 并抛错换源。`_download_chunked` 失败后若 `_no_range` 且未取消，清空 `.parts`、归零进度、退化 `_download_single` |
-| CORE-012 | 单线程路径的 200 保护 | `have>0` 且返回 200 时丢弃已下部分（`mode="wb"` 覆盖写）并回退 `_done`，绝不 append |
+| CORE-012 | 单线程路径的 200 保护 | `have>0` 且返回 200 时丢弃已下部分（`mode="wb"` 覆盖写）并回退 `_done`，绝不 append。续传指纹见 CORE-021 |
 | CORE-006b | 错误翻译表 | 12 个 HTTP 状态码全覆盖，由校验器守着，缺一个就红 |
 | CORE-013 | 代理 | `_opener(proxy)` 按 key 缓存 opener。`None`→读环境变量、`direct/none/off/no`→空 ProxyHandler、其他→`{"http": p, "https": p}`。`_request`/`probe`/`rank_mirrors` 全链路透传 |
 | CORE-014 | 全局限速 | `_RateLimiter`：桶容量=1 秒速率，`acquire(n)` 跨线程阻塞；worker 与单线程路径每写一块后调用 |
 | CORE-015 | 哈希识别 | 按长度查表 `{32:md5, 40:sha1, 64:sha256, 128:sha512}`；长度不匹配时抛「不匹配任何支持的算法」，不伪装成校验失败 |
-| CORE-016 | 任务队列（实现在 `taskqueue.py`） | `DownloadQueue(concurrent=2, on_event)`：`add()` 返回 tid、`cancel(tid)` 对排队任务直接摘除对运行任务置标志、`stats()` 返回各状态计数。事件 `(kind, tid, **kw)` 由工作线程抛出。任务进入终态后从 `_tasks` 移除，长会话不涨内存 |
+| CORE-016 | 任务队列（实现在 `taskqueue.py`） | `DownloadQueue(concurrent=2, on_event)`：`add()` 先构造任务、再在同一把锁里登记 `_tasks/_state/_pending`（避免 `_pump` 取走尚未登记的任务）；`cancel(tid)` 对排队任务直接摘除、对运行任务置标志；`forget(tid)` 只接受终态，移除后 `stats()` 立即减少；`_tasks` 终态释放，`_state` 保留到 `forget`。`_PATH_LOCKS` 按路径缓存、进程内不回收（已知限制，每路径约 100B） |
 | CORE-017 | SOCKS5 | `_socks5_connect()` 完成握手与 CONNECT；`_socks_opener()` 用动态子类替换 `HTTPConnection.connect`，HTTPS 再套 `_context.wrap_socket`。支持无认证与用户名密码 |
 | CORE-019 | 路径互斥 | `_path_lock(out)` 按规范化绝对路径取进程内锁；`run()` 非阻塞抢锁，失败即抛「同一文件已有任务在下载」。持锁范围覆盖下载 + 合并 + 校验，`finally` 释放。**已知限制**：仅进程内有效，两个 exe 同时下同一文件仍会冲突 |
-| CORE-020 | 大小上限 | `MAX_FILE_SIZE = 200GB`。`run()` 在确定 `size` 后立即检查，超限直接拒绝，不创建任何文件 |
+| CORE-020 | 大小上限与落盘预检 | `MAX_FILE_SIZE = 200GB`。`run()` 在确定 `size` 后、建目录之前检查路径长度、FAT32 单文件上限与剩余空间，不通过直接拒绝且不创建任何文件。探测本身失败（UNC、无权限、非 Windows）一律放行——预检只为提前报错，不得挡住能下的文件 |
+| CORE-021 | 单线程续传指纹 | `<out>.part.json` 记 `size/etag/url`：开下前写入（先写 `.tmp` 再 `replace`）、成功落盘后删除、取消/失败保留。续传前 `size` 必比，双方都有 ETag 时比 ETag；不符即删 `.part` 从头下。服务器无 ETag 时允许续传，但必须打 warn |
+| CORE-022 | ENOSPC 快速失败 | 写入遇 `errno.ENOSPC`（或 winerror 39/112）立即中止：分片路径置 `_fatal`、停止领片并在 join 后抛出；单线程路径直接抛。不得进退避重试。合并阶段失败时删除半成品输出、保留 `.parts` |
+| CORE-023 | 路径与文件系统预检 | 路径 `len(abspath) + 18 > 259` 拒绝（18 是 `.parts\part0000` 的后缀余量）；FAT32 且 `size > 4GB-1` 拒绝；可用空间 `< size*1.05 + 64MB` 拒绝，`< size*2` 只 warn（合并阶段分片与新文件并存） |
 | — | 超长分片自愈 | `_worker` 遇 `have > want` 直接删掉该分片重下。**不能用截断**：截断只去掉尾部，前面的垃圾字节会随合并进入成品，尺寸校验查不出、只有哈希能发现 |
 | — | 取消检查点 | 合并每片前、`_verify` 每 4MB 前都检查 `_cancel`，大文件取消不必等全量拷贝/哈希完成 |
 | — | 重试退避 | `min(8.0, 2**attempt) + random(0, 0.4)`，即 1/2/4/8/8 秒并带抖动 |

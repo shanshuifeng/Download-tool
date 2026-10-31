@@ -238,7 +238,11 @@ def main(argv=None):
     elapsed = time.time() - t0
     size = os.path.getsize(path)
     actual = None
-    if args.hash or expected:
+    if expected and task.hash_algo == "sha256" and task.actual_hash:
+        # _verify 已经把整个文件读过一遍，别再读第二遍（BUG-09）
+        actual = task.actual_hash
+    elif args.hash or expected:
+        # 期望值是 md5/sha1 时 done.sha256 仍要填 sha256，只能另算一次
         import hashlib
         h = hashlib.sha256()
         with open(path, "rb") as f:
@@ -248,7 +252,8 @@ def main(argv=None):
     emit({"event": "done", "path": path, "size": size,
           "sha256": actual,
           "sha256_expected": expected,
-          "verified": (actual == expected) if expected else None,
+          # 能走到这里说明 _verify 已经比对通过；不能再拿 sha256 值和 md5 期望值比
+          "verified": (True if expected else None),
           "elapsed": round(elapsed, 1),
           "avg_speed": round(size / elapsed if elapsed else 0)}, as_json)
     if not quiet:

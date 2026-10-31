@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import sys
@@ -71,6 +72,56 @@ class ContractToolTest(unittest.TestCase):
         keys = vc._dict_keys(ROOT / "src" / "gui.pyw", "DEFAULTS")
         self.assertIsInstance(keys, set)
         self.assertIn("last_dir", keys)
+
+    def test_anchor_check_scans_src(self):
+        """BUG-18 锚点检查必须扫到 src/，否则目录重组后整项空转。"""
+        vc._results.clear()
+        vc.check_anchors()
+        detail = vc._results[-1]["detail"]
+        self.assertNotIn("0 处锚点", detail, "锚点检查没扫到 src/")
+
+    @staticmethod
+    def _sources():
+        return sorted((ROOT / "src").glob("*.py")) + sorted((ROOT / "src").glob("*.pyw"))
+
+    def test_source_line_width(self):
+        """BUG-14 CODE-009 的行宽必须可执行，不能只写在文档里。"""
+        bad = []
+        for path in self._sources():
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if len(line) > 100:
+                    bad.append(f"{path.name}:{i}（{len(line)} 列）")
+        self.assertEqual(bad, [], f"超出 100 列：{bad}")
+
+    def test_source_no_dead_imports(self):
+        """BUG-12 源码里不许留死导入；_opener 是给测试的再导出，进白名单。"""
+        allow = {"_opener", "annotations"}
+        dead = {}
+        for path in self._sources():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            imported = {}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for a in node.names:
+                        imported[a.asname or a.name.split(".")[0]] = node.lineno
+                elif isinstance(node, ast.ImportFrom):
+                    for a in node.names:
+                        if a.name != "*":
+                            imported[a.asname or a.name] = node.lineno
+            used = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name):
+                    used.add(node.id)
+                elif isinstance(node, ast.Attribute):
+                    cur = node
+                    while isinstance(cur, ast.Attribute):
+                        cur = cur.value
+                    if isinstance(cur, ast.Name):
+                        used.add(cur.id)
+            left = sorted(k for k in imported if k not in used and k not in allow)
+            if left:
+                dead[path.name] = left
+        self.assertEqual(dead, {}, f"死导入：{dead}")
 
 
 if __name__ == "__main__":
