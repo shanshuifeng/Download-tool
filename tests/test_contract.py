@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "docs"))
 
 import verify_contract as vc  # noqa: E402
@@ -68,7 +68,7 @@ class ContractToolTest(unittest.TestCase):
 
     def test_dict_keys_tolerates_non_literal(self):
         """DEFAULTS 里有 os.path.join(...)，不能整体 literal_eval。"""
-        keys = vc._dict_keys(ROOT / "gui.pyw", "DEFAULTS")
+        keys = vc._dict_keys(ROOT / "src" / "gui.pyw", "DEFAULTS")
         self.assertIsInstance(keys, set)
         self.assertIn("last_dir", keys)
 

@@ -7,19 +7,27 @@
 ```
 桌面/
 ├── 下载工具.exe            # 双击即用
-├── 下载工具_便携版.zip      # 打包好的压缩包，解压到 U 盘即可
-└── 下载工具/               # 源码（构建产物 dist/ 打完即删，需要时按文末步骤重新生成）
-    ├── gui.pyw             # 界面（源码版，需 Python 3.11+）
-    ├── dl.py               # 命令行 / 自动化接口
-    ├── downloader.py       # 下载引擎（单文件：探测/分片/校验）+ CLI 入口
-    ├── taskqueue.py        # 多任务调度（并发上限、排队、取消）
-    ├── netio.py            # 传输层：UA、代理（HTTP/SOCKS5）、_request
-    ├── tests/              # 引擎 + 界面测试（本地假服务器，无需外网）
-    ├── docs/               # 契约文档 + 校验器，改代码前先看这里
-    ├── .git/               # 版本控制（构建产物与证书不入库）
-    ├── 使用说明.txt
-    ├── 便携版/             # zip 的内容
-    └── icon.ico / icon.png
+├── 下载工具_便携版.zip      # 解压到 U 盘即可（构建时自动生成）
+└── 下载工具/               # 项目根
+    ├── README.md
+    ├── 使用说明.txt          # 给最终用户看的一页纸
+    ├── job.example.json      # dl.exe --job 的示例
+    ├── build_and_sign.py     # 一条命令：校验 → 打包 → 签名 → 部署 → 出便携包
+    ├── src/                  # 源码（5 个模块，全部标准库）
+    │   ├── downloader.py     #   下载引擎：探测 / 分片 / 校验 / CLI 入口
+    │   ├── taskqueue.py      #   多任务调度：并发上限、排队、取消
+    │   ├── netio.py          #   传输层：UA、代理（HTTP/SOCKS5）、_request
+    │   ├── dl.py             #   命令行 / 自动化接口
+    │   └── gui.pyw           #   界面（源码版，需 Python 3.11+）
+    ├── assets/               # icon.ico / icon.png
+    ├── tests/                # 32 个用例（本地假服务器，无需外网）
+    ├── docs/                 # 契约文档 + 缺陷报告 + 校验器
+    └── build/                # 构建配置与产物
+        ├── version_info*.txt #   版本资源（入库）
+        ├── signing/          #   自签名证书（不入库）
+        ├── 便携版/           #   两份 exe + 便携 zip（不入库）
+        └── _backup_*/        #   每次部署前的旧 exe，只留最近 3 份（不入库）
+```
 ```
 
 ## 界面
@@ -51,7 +59,7 @@
 ```bash
 python downloader.py "<URL>" -o "D:\下载" -t 16
 python downloader.py "<URL>" -o "D:\a.zip" --sha256 <哈希>
-python downloader.py "<URL>" --chunk 8 --slow 10 --retries 10 --timeout 45
+python src\downloader.py "<URL>" --chunk 8 --slow 10 --retries 10 --timeout 45
 ```
 
 ## 自动化接口（dl.exe）
@@ -210,10 +218,10 @@ WSL 3.0.3 的 x64 MSI（350.5MB）：
 
 ## 改了代码怎么重新打包
 
-一条命令搞定（自动建临时环境、打包、写版本信息、签名、部署到三处）：
+一条命令搞定（校验 → 建临时环境 → 打包 → 写版本信息 → 签名 → 部署 → 出便携包）：
 
 ```bash
-cd /d "C:/Users/Administrator/Desktop/Mystery/下载工具"
+cd /d "C:/Users/Administrator/Desktop/下载工具"
 "C:/Program Files/Python313/python.exe" build_and_sign.py
 ```
 

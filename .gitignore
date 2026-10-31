@@ -1,16 +1,14 @@
-# 构建产物
+# 构建产物（build/ 下的版本信息文件是要入库的，只忽略产物部分）
 *.exe
 *.zip
-便携版/
-dist/
-build/
 *.spec
-
-# 打包备份（build_and_sign.py 自动生成）
-_backup_*/
+build/便携版/
+build/_backup_*/
+build/signing/
+build/dist/
 
 # 证书与私钥不入库
-signing/
+*.pfx
 
 # 本地运行态
 __pycache__/

@@ -26,8 +26,16 @@ from pathlib import Path
 
 DOCS = Path(__file__).resolve().parent
 ROOT = DOCS.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SRC = ROOT / "src"
+for _p in (str(ROOT), str(SRC)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+
+def resolve(rel: str) -> Path:
+    """源码在 src/，其余（测试、文档）在根目录，按存在性定位。"""
+    p = ROOT / rel
+    return p if p.exists() else SRC / rel
 
 BLOCK = re.compile(r"```contract\s*\n(.*?)\n```", re.S)
 ANCHOR = re.compile(r"#\s*@contract\s+([A-Z]{2,6}-\d{2,3}[a-z]?)")
@@ -115,7 +123,7 @@ def chk_const(doc, chk):
 
 
 def chk_error_table(doc, chk):
-    src = (ROOT / f"{chk['module']}.py").read_text(encoding="utf-8")
+    src = resolve(f"{chk['module']}.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     codes: set[int] = set()
     for node in ast.walk(tree):
@@ -213,7 +221,7 @@ def _dict_keys(path: Path, name: str) -> set[str] | None:
 
 
 def chk_dict_keys(doc, chk):
-    got = _dict_keys(ROOT / chk["file"], chk["name"])
+    got = _dict_keys(resolve(chk["file"]), chk["name"])
     if got is None:
         record(doc, "dict_keys", chk["name"], C_BAD,
                f"{chk['file']} 中找不到字典 {chk['name']}，或其键不是字符串常量")
@@ -242,7 +250,7 @@ def _imports(path: Path):
 
 
 def chk_imports_from(doc, chk):
-    got = {n for mod, n in _imports(ROOT / chk["file"]) if mod == chk["module"]}
+    got = {n for mod, n in _imports(resolve(chk["file"])) if mod == chk["module"]}
     want = set(chk["names"])
     bad = []
     if want - got:
@@ -254,7 +262,7 @@ def chk_imports_from(doc, chk):
 
 
 def chk_forbidden_imports(doc, chk):
-    got = {m for m, _ in _imports(ROOT / chk["file"])}
+    got = {m for m, _ in _imports(resolve(chk["file"]))}
     hit = [n for n in chk["names"] if n in got or n.split(".")[0] in got]
     record(doc, "forbidden_imports", chk["file"], C_BAD if hit else C_OK,
            f"出现了禁止的导入 {hit}" if hit else "无违规导入")
@@ -262,11 +270,11 @@ def chk_forbidden_imports(doc, chk):
 
 def chk_stdlib_only(doc, chk):
     # 本项目自己的模块（同目录 .py）不算第三方，新增文件无需改校验器
-    local = {p.stem for p in ROOT.glob("*.py")}
+    local = {p.stem for p in list(ROOT.glob("*.py")) + list(SRC.glob("*.py"))}
     std = set(sys.stdlib_module_names) | local | {"__future__"}
     bad = []
     for f in chk["files"]:
-        for mod, _ in _imports(ROOT / f):
+        for mod, _ in _imports(resolve(f)):
             root = (mod or "").split(".")[0]
             if root and root not in std:
                 bad.append(f"{f} → {root}")
@@ -277,7 +285,7 @@ def chk_stdlib_only(doc, chk):
 def chk_max_lines(doc, chk):
     bad, info = [], []
     for f, limit in chk["limits"].items():
-        n = len((ROOT / f).read_text(encoding="utf-8", errors="replace").splitlines())
+        n = len(resolve(f).read_text(encoding="utf-8", errors="replace").splitlines())
         info.append(f"{f}={n}")
         if n > limit:
             bad.append(f"{f} {n} 行 > 上限 {limit}")
@@ -289,7 +297,7 @@ def _test_blocks(files) -> dict[str, str]:
     """把 tests/ 下的测试方法按函数名切块，供交叉核对。"""
     blocks = {}
     for f in files:
-        text = (ROOT / f).read_text(encoding="utf-8", errors="replace")
+        text = resolve(f).read_text(encoding="utf-8", errors="replace")
         for m in re.finditer(r"    def (test_\w+)\b(.*?)(?=\n    def |\nclass |\Z)",
                              text, re.S):
             blocks[m.group(1)] = m.group(0)

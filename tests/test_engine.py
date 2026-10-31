@@ -32,7 +32,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+SRC = ROOT / "src"
+sys.path.insert(0, str(SRC))
 
 import downloader as dl  # noqa: E402
 import taskqueue as tq  # noqa: E402

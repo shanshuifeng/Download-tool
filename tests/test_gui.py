@@ -19,7 +19,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+SRC = ROOT / "src"
+sys.path.insert(0, str(SRC))
 
 try:
     import tkinter as tk
@@ -32,7 +33,7 @@ class GuiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         spec = importlib.util.spec_from_file_location("gui_under_test",
-                                                      ROOT / "gui.pyw")
+                                                      SRC / "gui.pyw")
         cls.gui = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.gui)
         # 配置写到临时目录，别碰用户真实的 config.json

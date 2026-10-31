@@ -24,31 +24,34 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 sys.stdout = __import__("io").TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(HERE, "src")
+ASSETS = os.path.join(HERE, "assets")
+BUILD = os.path.join(HERE, "build")
 VENV = os.path.join(tempfile.gettempdir(), "pyi_build_env")
 WORK = os.path.join(tempfile.gettempdir(), "pyi_work")
 DIST = os.path.join(tempfile.gettempdir(), "pyi_dist")
-PFX = os.path.join(HERE, "signing", "DownloadTool_SelfSigned.pfx")
-CER = os.path.join(HERE, "signing", "DownloadTool_SelfSigned.cer")
+PFX = os.path.join(BUILD, "signing", "DownloadTool_SelfSigned.pfx")
+CER = os.path.join(BUILD, "signing", "DownloadTool_SelfSigned.cer")
 # 优先读环境变量，避免把口令写死在会被分享的脚本里
 PFX_PASSWORD = os.environ.get("DLTOOL_PFX_PASSWORD", "dsh-local-sign-2026")
 MIRROR = "https://mirrors.aliyun.com/pypi/simple/"
 
 # 部署目标（相对当前用户）
+PORTABLE = os.path.join(BUILD, "便携版")
 DEPLOY = [
     os.path.join(os.path.expanduser("~"), "Desktop", "下载工具.exe"),
-    os.path.join(HERE, "下载工具.exe"),
-    os.path.join(HERE, "便携版", "下载工具.exe"),
+    os.path.join(PORTABLE, "下载工具.exe"),
 ]
 
 # 命令行/自动化接口：桌面也放一份，Agent 可直接调用
 DEPLOY_CLI = [
     os.path.join(os.path.expanduser("~"), "Desktop", "dl.exe"),
-    os.path.join(HERE, "dl.exe"),
-    os.path.join(HERE, "便携版", "dl.exe"),
+    os.path.join(PORTABLE, "dl.exe"),
 ]
 
 
@@ -131,20 +134,22 @@ def build(py):
     # GUI
     run([py, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed",
          "--name", "DownloadTool",
-         "--icon", os.path.join(HERE, "icon.ico"),
-         "--version-file", os.path.join(HERE, "version_info.txt"),
+         "--paths", SRC,
+         "--icon", os.path.join(ASSETS, "icon.ico"),
+         "--version-file", os.path.join(BUILD, "version_info.txt"),
          "--distpath", DIST, "--workpath", WORK, "--specpath", WORK,
-         os.path.join(HERE, "gui.pyw")])
+         os.path.join(SRC, "gui.pyw")])
     gui = os.path.join(DIST, "DownloadTool.exe")
 
     # CLI（控制台，供脚本 / AI 调用）
     run([py, "-m", "PyInstaller", "--noconfirm", "--onefile", "--console",
          "--name", "dl",
-         "--icon", os.path.join(HERE, "icon.ico"),
-         "--version-file", os.path.join(HERE, "version_info_cli.txt"),
+         "--paths", SRC,
+         "--icon", os.path.join(ASSETS, "icon.ico"),
+         "--version-file", os.path.join(BUILD, "version_info_cli.txt"),
          "--distpath", DIST, "--workpath", os.path.join(WORK, "cli"),
          "--specpath", os.path.join(WORK, "cli"),
-         os.path.join(HERE, "dl.py")])
+         os.path.join(SRC, "dl.py")])
     cli = os.path.join(DIST, "dl.exe")
 
     for f in (gui, cli):
@@ -196,11 +201,11 @@ def prune_backups(keep=3):
     不设上限的话，两个月就能堆出几个 G —— 这正是这轮清理掉的东西。
     """
     dirs = sorted(
-        (d for d in os.listdir(HERE) if d.startswith("_backup_")),
+        (d for d in os.listdir(BUILD) if d.startswith("_backup_")),
         reverse=True,
     )
     for d in dirs[keep:]:
-        p = os.path.join(HERE, d)
+        p = os.path.join(BUILD, d)
         try:
             shutil.rmtree(p)
             print("  已清理旧备份:", d)
@@ -208,9 +213,37 @@ def prune_backups(keep=3):
             print("  旧备份清理失败（可忽略）:", d, e)
 
 
+def pack_portable(exe, exe_cli):
+    """把便携版内容归拢到 build/便携版/ 并打成 zip。
+
+    以前这一步靠手工，导致 zip 经常内含旧 exe —— 没人会发现。
+    """
+    names = ["README.md", "使用说明.txt", "job.example.json"]
+    os.makedirs(PORTABLE, exist_ok=True)
+    if exe:
+        shutil.copy2(exe, os.path.join(PORTABLE, "下载工具.exe"))
+    if exe_cli:
+        shutil.copy2(exe_cli, os.path.join(PORTABLE, "dl.exe"))
+    for n in names:
+        src = os.path.join(HERE, n)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(PORTABLE, n))
+
+    members = [n for n in ["下载工具.exe", "dl.exe"] + names
+               if os.path.isfile(os.path.join(PORTABLE, n))]
+    zpath = os.path.join(PORTABLE, "下载工具_便携版.zip")
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+        for n in members:
+            z.write(os.path.join(PORTABLE, n), "下载工具/" + n)
+    desktop = os.path.join(os.path.expanduser("~"), "Desktop", "下载工具_便携版.zip")
+    shutil.copy2(zpath, desktop)
+    print("  便携包:", zpath, f"({os.path.getsize(zpath)/1048576:.1f} MB)")
+
+
 def deploy(exe, exe_cli=None):
     print("[5/5] 部署")
-    bak = os.path.join(HERE, "_backup_" + __import__("datetime").date.today().strftime("%Y%m%d"))
+    os.makedirs(BUILD, exist_ok=True)
+    bak = os.path.join(BUILD, "_backup_" + __import__("datetime").date.today().strftime("%Y%m%d"))
     os.makedirs(bak, exist_ok=True)
     kill_running_tool()
     pairs = [(exe, DEPLOY)]
@@ -228,6 +261,7 @@ def deploy(exe, exe_cli=None):
             print("  已部署:", t)
     print("  备份目录:", bak)
     prune_backups()
+    pack_portable(exe, exe_cli)
 
 
 def main():

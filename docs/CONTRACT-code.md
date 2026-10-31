@@ -129,7 +129,7 @@ dl.py ────────> downloader.py
 改完代码，按顺序过一遍：
 
 1. `python docs/verify_contract.py` 全绿
-2. 三个入口都能起来：`python downloader.py --help`、`python dl.py --schema`、双击 `gui.pyw`
+2. 三个入口都能起来：`python src/downloader.py --help`、`python src/dl.py --schema`、双击 `src/gui.pyw`
 3. 小文件（<2MB）走单线程、大文件走分段，两条路径都跑通
 4. 中途 `Ctrl+C` / 关窗口，`.parts` 保留且能续传
 5. 改过界面的，125% 与 150% 缩放下各看一遍

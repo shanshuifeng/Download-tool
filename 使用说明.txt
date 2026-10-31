@@ -48,13 +48,13 @@
   - 放在本机桌面/文档 → 在 %APPDATA%\下载工具\config.json，不弄脏桌面
   删掉它即可恢复默认设置
 · 杀毒软件可能报「未知程序」——PyInstaller 单文件程序的常见误报，
-  加信任即可。介意的话可以用文件夹里的 gui.pyw 源码版（需装 Python）
+  加信任即可。介意的话可以用源码版 src/gui.pyw（需装 Python）
 
 
 源码版（需 Python 3.11+）
 -------------------------
 命令行：
-    python downloader.py "<链接>" -o "D:\保存目录" -t 16 --sha256 <哈希>
+    python src/downloader.py "<链接>" -o "D:\保存目录" -t 16 --sha256 <哈希>
 
 详细说明见 README.md
 
