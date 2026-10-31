@@ -90,9 +90,9 @@ def find_signtool():
 def ensure_venv():
     py = os.path.join(VENV, "Scripts", "python.exe")
     if os.path.isfile(py):
-        print("[1/5] 复用已有构建环境")
+        print("[2/5] 复用已有构建环境")
         return py
-    print("[1/5] 创建构建环境并安装 PyInstaller")
+    print("[2/5] 创建构建环境并安装 PyInstaller")
     base = find_python313()
     print("  基础解释器:", base)
     run([base, "-m", "venv", VENV])
@@ -113,7 +113,8 @@ def check_all():
     for name, cmd in jobs:
         r = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
-        for line in (r.stdout or "").strip().splitlines()[-3:]:
+        out = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()
+        for line in out[-3:]:
             print("    " + line)
         if r.returncode != 0:
             print(f"  ! {name}失败，已中止打包（--skip-checks 可强行跳过）")
@@ -123,7 +124,7 @@ def check_all():
 
 
 def build(py):
-    print("[2/5] 打包（含版本资源）")
+    print("[3/5] 打包（含版本资源）")
     for d in (WORK, DIST):
         shutil.rmtree(d, ignore_errors=True)
 
@@ -228,7 +229,7 @@ def main():
         exe_cli = os.path.join(DIST, "dl.exe")
         if not os.path.isfile(exe):
             raise SystemExit("dist 中没有现成 exe，请去掉 --no-build")
-        print("[2/5] 跳过打包，使用:", exe, "/", exe_cli)
+        print("[3/5] 跳过打包，使用:", exe, "/", exe_cli)
     else:
         exe, exe_cli = build(py)
 
