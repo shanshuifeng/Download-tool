@@ -189,6 +189,25 @@ def sign(exe, signtool):
          "/d", "DownloadTool - Multi-thread Segment Downloader", exe])
 
 
+def prune_backups(keep=3):
+    """只留最近 keep 个 _backup_* 目录。
+
+    每次部署都会把旧 exe 备份到当天的目录里，一个目录约 23MB。
+    不设上限的话，两个月就能堆出几个 G —— 这正是这轮清理掉的东西。
+    """
+    dirs = sorted(
+        (d for d in os.listdir(HERE) if d.startswith("_backup_")),
+        reverse=True,
+    )
+    for d in dirs[keep:]:
+        p = os.path.join(HERE, d)
+        try:
+            shutil.rmtree(p)
+            print("  已清理旧备份:", d)
+        except OSError as e:
+            print("  旧备份清理失败（可忽略）:", d, e)
+
+
 def deploy(exe, exe_cli=None):
     print("[5/5] 部署")
     bak = os.path.join(HERE, "_backup_" + __import__("datetime").date.today().strftime("%Y%m%d"))
@@ -208,6 +227,7 @@ def deploy(exe, exe_cli=None):
             shutil.copy2(src, t)
             print("  已部署:", t)
     print("  备份目录:", bak)
+    prune_backups()
 
 
 def main():
