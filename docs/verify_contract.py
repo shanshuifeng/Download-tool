@@ -285,8 +285,19 @@ def chk_max_lines(doc, chk):
            "；".join(bad) if bad else " ".join(info))
 
 
+def _test_blocks(files) -> dict[str, str]:
+    """把 tests/ 下的测试方法按函数名切块，供交叉核对。"""
+    blocks = {}
+    for f in files:
+        text = (ROOT / f).read_text(encoding="utf-8", errors="replace")
+        for m in re.finditer(r"    def (test_\w+)\b(.*?)(?=\n    def |\nclass |\Z)",
+                             text, re.S):
+            blocks[m.group(1)] = m.group(0)
+    return blocks
+
+
 def chk_req_tests(doc, chk):
-    """凡标「已完成」的需求，必须挂一个真实存在的测试函数。"""
+    """凡标「已完成」的需求，必须挂一个真实存在、且自己声明了 REQ 编号的测试。"""
     text = (DOCS / chk["req"]).read_text(encoding="utf-8", errors="replace")
     done, mapping = set(), {}
     for line in text.splitlines():
@@ -300,20 +311,23 @@ def chk_req_tests(doc, chk):
         if t:
             mapping[t.group(1)] = t.group(2)
 
-    defined = set()
-    for f in chk["tests"]:
-        defined |= set(re.findall(r"def (test_\w+)",
-                                  (ROOT / f).read_text(encoding="utf-8",
-                                                       errors="replace")))
+    blocks = _test_blocks(chk["tests"])
+    defined = set(blocks)
     no_test = sorted(done - set(mapping))
     missing = sorted({mapping[r] for r in done if r in mapping} - defined)
+    # 交叉核对：测试自己也要写明 REQ 编号，否则「挂到名字像的测试上」也能蒙混过关
+    unmarked = sorted(f"{r}→{mapping[r]}" for r in done
+                      if r in mapping and mapping[r] in defined
+                      and r not in blocks[mapping[r]])
     bad = []
     if no_test:
         bad.append(f"标已完成但没挂测试 {no_test}")
     if missing:
         bad.append(f"测试函数不存在 {missing}")
+    if unmarked:
+        bad.append(f"测试体内没有声明对应 REQ 编号 {unmarked}")
     record(doc, "req_tests", "需求↔测试", C_BAD if bad else C_OK,
-           "；".join(bad) if bad else f"{len(done)} 条已完成需求均有测试")
+           "；".join(bad) if bad else f"{len(done)} 条已完成需求均有带标记的测试")
 
 
 DISPATCH = {
@@ -352,7 +366,8 @@ def check_anchors():
 # ---------------- 输出 ----------------
 
 def report(as_json: bool, verbose: bool) -> int:
-    bad = [r for r in _results if r["state"] == C_BAD]
+    # SKIP 也算失败：静默跳过的检查等于没有检查
+    bad = [r for r in _results if r["state"] in (C_BAD, C_SKIP)]
     if as_json:
         print(json.dumps({"ok": not bad, "total": len(_results),
                           "failed": len(bad), "results": _results},
@@ -399,7 +414,10 @@ def main(argv=None):
     for doc, chk in checks:
         fn = DISPATCH.get(chk.get("type"))
         if not fn:
-            record(doc, chk.get("type", "?"), "未知检查类型", C_SKIP, "校验器不支持，请升级脚本")
+            # 写错类型必须炸出来。记成 SKIP 会让检查静默消失，
+            # 而 SKIP 又不计入失败 —— 整套契约就变成了装饰
+            record(doc, chk.get("type", "?"), "未知检查类型", C_BAD,
+                   "校验器不支持该 type，文档或脚本有笔误")
             continue
         try:
             fn(doc, chk)

@@ -62,6 +62,17 @@ REQ-015 ──> 依赖 REQ-009   代理骨架先有，再补 SOCKS5 握手
 | REQ-015 | SOCKS5 代理（自实现握手，不引入 PySocks） | Gopeed | 经本地 SOCKS5 服务完成真实下载（不只是构造 opener）；用户名密码分支已实现 | CORE-017 | 已完成 2026-10-31（端到端只覆盖无认证） |
 | REQ-008b | 运行中切走最慢分片的剩余区间 | Ghost 3 | — | CORE-010 | **不做**：队列取片 + 4× 粒度 + 慢链换源已覆盖主要收益，动态改写分片边界会破坏续传 meta 的稳定性 |
 
+## 批次 4 · 二次加固（P0/P1，2026-10-31 评审后）
+
+| ID | 需求 | 来源 | 验收标准 | 契约影响 | 状态 |
+|---|---|---|---|---|---|
+| REQ-017 | 超长分片必须自愈：`have > want` 时**整片删除重下**。截断会保住前面的垃圾字节，静默产出哈希不符的文件 | 实测复现 | 预置超长 part + 匹配 etag 的 meta，一次 `run()` 必须成功且哈希与服务器一致（截断方案在此用例下哈希不符） | CORE-011 | 已完成 2026-10-31 |
+| REQ-018 | 同一输出路径互斥：两个任务不得并行写同一个 `.parts` 与输出文件 | 代码审查 | 先占锁再下同一路径必须报「已有任务」；锁释放后同一路径能正常完成 | CORE-019 | 已完成 2026-10-31 |
+| REQ-019 | 文件大小上限，挡谎报的 `Content-Length` | 代码审查 | 上报 `MAX_FILE_SIZE+1` 必须被拒绝，且不产生输出文件与 `.parts` | CORE-020 | 已完成 2026-10-31 |
+| REQ-020 | 校验器不能静默通过：未知检查类型与 SKIP 一律判失败；REQ↔测试必须双向声明 | 自我评审 | 未知 type 使 `report()` 返回 1；已完成需求缺测试或缺 REQ 标记都必须报红 | CODE-010 | 已完成 2026-10-31 |
+
+
+
 ## 明确不做
 
 | ID | 项 | 理由 |
@@ -96,6 +107,10 @@ REQ-015 ──> 依赖 REQ-009   代理骨架先有，再补 SOCKS5 握手
 | REQ-014 | test_task_rows_created |
 | REQ-015 | test_socks5_proxy |
 | REQ-016 | test_chunk_count_independent_of_threads |
+| REQ-017 | test_oversized_part_self_heals |
+| REQ-018 | test_same_path_conflict |
+| REQ-019 | test_file_too_large |
+| REQ-020 | test_skip_counts_as_failure |
 
 ## 状态跟踪
 

@@ -178,6 +178,10 @@ progress(d: dict)                    # d 的键固定为下表
 | CORE-015 | 哈希识别 | 按长度查表 `{32:md5, 40:sha1, 64:sha256, 128:sha512}`；长度不匹配时抛「不匹配任何支持的算法」，不伪装成校验失败 |
 | CORE-016 | 任务队列（实现在 `taskqueue.py`） | `DownloadQueue(concurrent=2, on_event)`：`add()` 返回 tid、`cancel(tid)` 对排队任务直接摘除对运行任务置标志、`stats()` 返回各状态计数。事件 `(kind, tid, **kw)` 由工作线程抛出。任务进入终态后从 `_tasks` 移除，长会话不涨内存 |
 | CORE-017 | SOCKS5 | `_socks5_connect()` 完成握手与 CONNECT；`_socks_opener()` 用动态子类替换 `HTTPConnection.connect`，HTTPS 再套 `_context.wrap_socket`。支持无认证与用户名密码 |
+| CORE-019 | 路径互斥 | `_path_lock(out)` 按规范化绝对路径取进程内锁；`run()` 非阻塞抢锁，失败即抛「同一文件已有任务在下载」。持锁范围覆盖下载 + 合并 + 校验，`finally` 释放。**已知限制**：仅进程内有效，两个 exe 同时下同一文件仍会冲突 |
+| CORE-020 | 大小上限 | `MAX_FILE_SIZE = 200GB`。`run()` 在确定 `size` 后立即检查，超限直接拒绝，不创建任何文件 |
+| — | 超长分片自愈 | `_worker` 遇 `have > want` 直接删掉该分片重下。**不能用截断**：截断只去掉尾部，前面的垃圾字节会随合并进入成品，尺寸校验查不出、只有哈希能发现 |
+| — | 取消检查点 | 合并每片前、`_verify` 每 4MB 前都检查 `_cancel`，大文件取消不必等全量拷贝/哈希完成 |
 | — | 重试退避 | `min(8.0, 2**attempt) + random(0, 0.4)`，即 1/2/4/8/8 秒并带抖动 |
 | — | 续传指纹 | `meta.json` 记录 `etag`；`size`、`chunks`、`etag` 三者任一不符即删除全部分片 |
 

@@ -64,7 +64,7 @@ class GuiTest(unittest.TestCase):
         self.assertFalse(app._url_box_empty())
 
     def test_clipboard_fills_when_placeholder(self):
-        """输入框只有占位符时，剪贴板里的直链应被填入。"""
+        """REQ-011 输入框只有占位符时，剪贴板里的直链应被填入。"""
         app = self.app
         app.txt_url.delete("1.0", "end")
         app.txt_url.insert("1.0", "https://…")
@@ -97,7 +97,7 @@ class GuiTest(unittest.TestCase):
         self.assertEqual(app.queue.concurrent, 3)
 
     def test_task_rows_created(self):
-        """每点一次开始下载就多一行任务，列表从隐藏变为显示。"""
+        """REQ-014 每点一次开始下载就多一行任务，列表从隐藏变为显示。"""
         app = self.app
         app.queue.add = lambda *a, **k: len(app.rows) + 1
         self.assertFalse(app._list_shown)

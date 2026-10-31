@@ -56,6 +56,19 @@ MAX_RETRY = 6
 
 _HASH_BY_LEN = {32: "md5", 40: "sha1", 64: "sha256", 128: "sha512"}
 
+# 挡谎报 Content-Length 的服务器：超过这个体积直接拒绝，不做预分配
+MAX_FILE_SIZE = 200 * 1024 ** 3      # 200GB
+
+_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _path_lock(path: str) -> threading.Lock:  # @contract CORE-019
+    """按规范化的绝对路径取进程内互斥锁，防止两个任务写同一个文件。"""
+    key = os.path.normcase(os.path.abspath(path))
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(key, threading.Lock())
+
 
 class DownloadError(Exception):
     pass
@@ -455,6 +468,23 @@ class DownloadTask:
         ranges = best["info"]["ranges"]
         self.log(f"文件大小 {human(self.size)}，分段下载：{'支持' if ranges else '不支持（退化为单线程）'}")
 
+        if self.size > MAX_FILE_SIZE:
+            raise DownloadError(
+                f"文件大小 {human(self.size)} 超过上限 {human(MAX_FILE_SIZE)}，已拒绝\n"
+                f"  如果确实要下这么大的文件，请用 curl/aria2 这类不限量的工具")
+
+        # 同一路径只允许一个任务：并发写同一个 .parts 会互相覆盖分片
+        lock = _path_lock(out)
+        if not lock.acquire(blocking=False):
+            raise DownloadError(
+                f"同一文件已有任务在下载：{out}\n  等它结束，或换个保存位置/文件名")
+        try:
+            return self._fetch(best["info"]["url"], ranges)
+        finally:
+            lock.release()
+
+    def _fetch(self, best_url, ranges):
+        """路径锁已持有后的实际下载与校验。"""
         if ranges and self.size > MIN_CHUNK * 2:
             try:
                 self._download_chunked()
@@ -470,7 +500,7 @@ class DownloadTask:
                 self._no_range = False
                 self._download_single(self.mirrors[0])
         else:
-            self._download_single(best["info"]["url"])
+            self._download_single(best_url)
 
         if self._cancel.is_set():
             raise DownloadError("已取消（已下载的分片保留，下次可续传）")
@@ -633,6 +663,8 @@ class DownloadTask:
         with open(self.out_path, mode) as out:
             out.truncate(self.size)
             for i, (start, end) in enumerate(chunks):
+                if self._cancel.is_set():
+                    raise DownloadError("已取消（分片保留，下次可续传）")
                 p = os.path.join(parts_dir, f"part{i:04d}")
                 want = end - start + 1
                 got = os.path.getsize(p)
@@ -655,6 +687,14 @@ class DownloadTask:
             if self._cancel.is_set():
                 return
             have = os.path.getsize(path) if os.path.exists(path) else 0
+            if have > want:
+                # 超长说明这个分片不属于当前区间（被别人写过/上次异常）。
+                # 截断只会保住前面的垃圾字节，静默产出坏文件；必须整片重下
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                have = 0
             if have >= want:
                 return
             url = self.mirrors[(mirror_idx + attempt) % len(self.mirrors)]
@@ -729,8 +769,13 @@ class DownloadTask:
         algo = _HASH_BY_LEN[len(want)]
         h = hashlib.new(algo)
         with open(self.out_path, "rb") as f:
-            for b in iter(lambda: f.read(4 * 1024 * 1024), b""):
-                h.update(b)
+            while True:
+                if self._cancel.is_set():
+                    raise DownloadError("已取消（文件已下载，未完成校验）")
+                block = f.read(4 * 1024 * 1024)
+                if not block:
+                    break
+                h.update(block)
         got = h.hexdigest()
         if got != want:
             bad = self._quarantine("哈希不符")

@@ -47,14 +47,19 @@ class Handler(BaseHTTPRequestHandler):
     mode = "range"
     etag = '"v1"'
     payload = PAYLOAD
+    delay = 0.0          # 每个 GET 前的延迟，用于制造「下载中」状态
+    fake_size = None     # 谎报 Content-Length，用于测大小上限
 
     protocol_version = "HTTP/1.1"
 
     def log_message(self, *a):
         pass
 
+    def _size(self):
+        return self.fake_size if self.fake_size else len(self.payload)
+
     def _common(self):
-        self.send_header("Content-Length", str(len(self.payload)))
+        self.send_header("Content-Length", str(self._size()))
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("ETag", self.etag)
         self.send_header("Content-Type", "application/octet-stream")
@@ -65,6 +70,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if self.delay:
+            time.sleep(self.delay)
         rng = self.headers.get("Range")
         if self.mode == "range" and rng:
             m = re.match(r"bytes=(\d+)-(\d*)", rng)
@@ -208,7 +215,7 @@ class EngineTest(unittest.TestCase):
         self.assertTrue(any(d["phase"] == "done" for d in seen))
 
     def test_server_ignores_range_falls_back(self):
-        """声称支持分段却回 200：必须兜底单线程，产物正确且不留 .corrupt。"""
+        """REQ-001 声称支持分段却回 200：必须兜底单线程，产物正确且不留 .corrupt。"""
         Handler.mode = "ignore"
         logs = []
         path, _ = self._run(log=lambda m, lv="info": logs.append(m))
@@ -228,7 +235,7 @@ class EngineTest(unittest.TestCase):
             Handler.payload = PAYLOAD
 
     def test_etag_change_discards_parts(self):
-        """指纹变了就作废旧分片，不能把旧内容拼进新文件。"""
+        """REQ-007 指纹变了就作废旧分片，不能把旧内容拼进新文件。"""
         chunks = [[i * 1048576, (i + 1) * 1048576 - 1] for i in range(5)]
         parts = Path(self.out + ".parts")
         parts.mkdir()
@@ -245,7 +252,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(meta.get("etag"), '"v2"')
 
     def test_socks5_proxy(self):
-        """走 SOCKS5 代理完成下载，验证握手与 CONNECT 而不只是构造 opener。"""
+        """REQ-015 走 SOCKS5 代理完成下载，验证握手与 CONNECT 而不只是构造 opener。"""
         srv = Socks5Server()
         srv.start()
         Handler.payload = os.urandom(300 * 1024)
@@ -260,7 +267,7 @@ class EngineTest(unittest.TestCase):
     # ---------------- 修复批次回归 ----------------
 
     def test_rate_limiter_small_rate(self):
-        """限速低于块大小时不得死等（请求量必须被夹到一桶以内）。"""
+        """REQ-010 限速低于块大小时不得死等（请求量必须被夹到一桶以内）。"""
         lim = dl._RateLimiter(100 * 1024)
         t0 = time.time()
         lim.acquire(dl.BLOCK)          # 256KB > 桶容量 100KB
@@ -287,7 +294,7 @@ class EngineTest(unittest.TestCase):
         self.assertTrue(a.startswith("download_") and a.endswith(".bin"))
 
     def test_mirror_probe_is_concurrent(self):
-        """四个源各睡 0.3s，总耗时必须明显短于串行的 1.2s。"""
+        """REQ-003 四个源各睡 0.3s，总耗时必须明显短于串行的 1.2s。"""
         orig = dl._measure_mirror
 
         def slow(u, proxy=None):
@@ -308,12 +315,12 @@ class EngineTest(unittest.TestCase):
         self.assertLess(elapsed, 0.9, "探测没有并发")
 
     def test_chunk_count_independent_of_threads(self):
-        """chunk_mb=1 + threads=2 下 5MB 仍必须切成 5 片全部下完。"""
+        """REQ-008 / REQ-016 chunk_mb=1 + threads=2 下 5MB 仍必须切成 5 片全部下完。"""
         path, _ = self._run(threads=2, chunk_mb=1)
         self.assertEqual(self._sha(path), PAYLOAD_SHA)
 
     def test_single_thread_ignores_range(self):
-        """单线程路径：已有 .part 且服务器忽略 Range 时必须从头覆盖，不得续写。"""
+        """REQ-002 单线程路径：已有 .part 且服务器忽略 Range 时必须从头覆盖，不得续写。"""
         Handler.mode = "ignore"
         with open(self.out + ".part", "wb") as f:
             f.write(b"\xff" * 100000)
@@ -323,21 +330,72 @@ class EngineTest(unittest.TestCase):
         self.assertFalse(os.path.exists(path + ".part"))
 
     def test_next_floor(self):
-        """动态慢速下限：未达 4 倍门限不动，达到后抬到全局的 20%。"""
+        """REQ-005 动态慢速下限：未达 4 倍门限不动，达到后抬到全局的 20%。"""
         self.assertEqual(dl._next_floor(0, 1e9), 0)
         self.assertEqual(dl._next_floor(15, 50 * 1024), 15)
         self.assertEqual(dl._next_floor(15, 20 * 1024 * 1024), 4096)
 
     def test_backoff(self):
-        """退避序列 1/2/4/8/8 秒，抖动不超过 0.4s。"""
+        """REQ-006 退避序列 1/2/4/8/8 秒，抖动不超过 0.4s。"""
         for i, base in enumerate((1, 2, 4, 8, 8, 8)):
             v = dl._backoff(i)
             self.assertGreaterEqual(v, base)
             self.assertLessEqual(v, base + 0.4)
 
+    def test_oversized_part_self_heals(self):
+        """REQ-017 超长分片必须整片重下，不能截断（截断会保住垃圾字节）。"""
+        Handler.payload = os.urandom(3 * 1024 * 1024 + 100)
+        Handler.etag = '"v-oversize"'
+        try:
+            size = len(Handler.payload)
+            chunk = dl.MIN_CHUNK
+            chunks = [[i * chunk, min(i * chunk + chunk - 1, size - 1)]
+                      for i in range((size + chunk - 1) // chunk)]
+            parts = Path(self.out + ".parts")
+            parts.mkdir()
+            # meta 必须与服务器指纹一致，否则分片会被整体丢弃，测不到超长分支
+            (parts / "meta.json").write_text(json.dumps(
+                {"size": size, "chunks": chunks, "mirrors": [],
+                 "etag": Handler.etag}), encoding="utf-8")
+            (parts / "part0000").write_bytes(b"\xff" * (chunk + 5000))
+
+            path, _ = self._run(threads=4)
+            self.assertEqual(self._sha(path),
+                             hashlib.sha256(Handler.payload).hexdigest())
+        finally:
+            Handler.payload = PAYLOAD
+            Handler.etag = '"v1"'
+
+    def test_same_path_conflict(self):
+        """REQ-018 同一输出路径只允许一个任务，第二个必须立刻报错而不是并行写。"""
+        lock = dl._path_lock(self.out)
+        self.assertTrue(lock.acquire(blocking=False))
+        try:
+            with self.assertRaises(dl.DownloadError) as ctx:
+                self._run()
+            self.assertIn("已有任务", str(ctx.exception))
+        finally:
+            lock.release()
+
+        # 锁释放后同一个路径必须能正常下载
+        path, _ = self._run()
+        self.assertEqual(self._sha(path), PAYLOAD_SHA)
+
+    def test_file_too_large(self):
+        """REQ-019 谎报的 Content-Length 超过上限时必须直接拒绝，不预分配巨型文件。"""
+        Handler.fake_size = dl.MAX_FILE_SIZE + 1024
+        try:
+            with self.assertRaises(dl.DownloadError) as ctx:
+                self._run()
+            self.assertIn("超过上限", str(ctx.exception))
+            self.assertFalse(os.path.exists(self.out))
+            self.assertFalse(os.path.exists(self.out + ".parts"))
+        finally:
+            Handler.fake_size = None
+
 
     def test_distribute_weights(self):
-        """加权分配：片数总和精确、最快的源拿最多、退化为轮转。"""
+        """REQ-004 加权分配：片数总和精确、最快的源拿最多、退化为轮转。"""
         a = dl._distribute([100, 10, 5, 1], 32)
         self.assertEqual(len(a), 32)
         self.assertEqual(a.count(0), 28)
@@ -347,7 +405,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(dl._distribute([0, 0], 4), [0, 1, 0, 1])
 
     def test_sha512_verify(self):
-        """128 位哈希按 SHA512 识别并通过校验（校验失败会直接抛错）。"""
+        """REQ-012 128 位哈希按 SHA512 识别并通过校验（校验失败会直接抛错）。"""
         path, _ = self._run(sha256=hashlib.sha512(PAYLOAD).hexdigest())
         self.assertEqual(os.path.getsize(path), len(PAYLOAD))
 
@@ -367,7 +425,7 @@ class EngineTest(unittest.TestCase):
         self.assertLess(time.time() - t0, 2.0)
 
     def test_opener_cache_and_direct(self):
-        """代理 opener 按 key 缓存，direct 与环境变量模式互不复用。"""
+        """REQ-009 代理 opener 按 key 缓存，direct 与环境变量模式互不复用。"""
         self.assertIs(dl._opener("direct"), dl._opener("direct"))
         self.assertIsNot(dl._opener("direct"), dl._opener(None))
         self.assertIsNot(dl._opener("http://127.0.0.1:7890"),
@@ -420,7 +478,7 @@ class QueueTest(unittest.TestCase):
         return q.stats()
 
     def test_concurrency_cap(self):
-        """并发上限生效：4 个任务、并发 2，峰值同时运行数不得超过 2。"""
+        """REQ-013 并发上限生效：4 个任务、并发 2，峰值同时运行数不得超过 2。"""
         events = []
         q = tq.DownloadQueue(concurrent=2,
                              on_event=lambda k, tid, **kw: events.append((k, tid, kw)))
