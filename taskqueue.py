@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""taskqueue.py —— 多任务调度（纯标准库）
+
+引擎管「一个文件怎么下完」，这里管「谁先下、同时下几个」。
+不碰网络、不碰界面，只调度 DownloadTask 并转出事件。
+
+分层约定：taskqueue 依赖 downloader，不得反向依赖；
+界面层同时依赖 downloader（人类可读格式化）与 taskqueue（调度）。
+"""
+
+from __future__ import annotations
+
+import threading
+from collections import deque
+
+from downloader import DownloadError, DownloadTask
+
+
+class DownloadQueue:  # @contract CORE-016
+    """任务队列：限并发、排队、单条取消。
+
+    分工：DownloadTask 只管一个文件怎么下完，Queue 管谁先下、同时下几个。
+    事件统一走 on_event(kind, tid, **kw)，kind ∈ {state, progress, log}，
+    由工作线程抛出——调用方（尤其 GUI）必须自己转到线程安全的地方。
+    """
+
+    def __init__(self, concurrent=2, on_event=None):
+        self.concurrent = max(1, int(concurrent))
+        self._event = on_event or (lambda kind, tid, **kw: None)
+        self._lock = threading.Lock()
+        self._tasks = {}
+        self._state = {}
+        self._pending = deque()
+        self._running = {}
+        self._seq = 0
+
+    # ---------- 对外 ----------
+    def add(self, urls, out_path=None, **kw):
+        with self._lock:
+            self._seq += 1
+            tid = self._seq
+            self._state[tid] = "queued"
+            self._pending.append(tid)
+
+        def log(msg, level="info"):
+            self._event("log", tid, msg=msg, level=level)
+
+        def progress(d):
+            self._event("progress", tid, data=d)
+
+        task = DownloadTask(urls, out_path, log=log, progress=progress, **kw)
+        with self._lock:
+            self._tasks[tid] = task
+        self._event("state", tid, state="queued")
+        self._pump()
+        return tid
+
+    def cancel(self, tid):
+        with self._lock:
+            state = self._state.get(tid)
+            task = self._tasks.get(tid)
+            if state == "queued":
+                self._state[tid] = "cancelled"
+        if state == "queued":
+            self._event("state", tid, state="cancelled")
+            return True
+        if task is None or state != "running":
+            return False
+        task.cancel()
+        return True
+
+    def cancel_all(self):
+        with self._lock:
+            ids = list(self._state)
+        for tid in ids:
+            self.cancel(tid)
+
+    def stats(self):
+        with self._lock:
+            states = list(self._state.values())
+        return {"total": len(states), "queued": states.count("queued"),
+                "running": states.count("running"), "done": states.count("done"),
+                "failed": states.count("failed"),
+                "cancelled": states.count("cancelled")}
+
+    def state_of(self, tid):
+        with self._lock:
+            return self._state.get(tid)
+
+    # ---------- 内部 ----------
+    def _pump(self):
+        with self._lock:
+            while self._pending and len(self._running) < self.concurrent:
+                tid = self._pending.popleft()
+                if self._state.get(tid) != "queued":
+                    continue
+                self._state[tid] = "running"
+                self._running[tid] = True
+                threading.Thread(target=self._run_one, args=(tid,),
+                                 daemon=True).start()
+
+    def _run_one(self, tid):
+        task = self._tasks[tid]
+        self._event("state", tid, state="running")
+        try:
+            path = task.run()
+            with self._lock:
+                self._state[tid] = "done"
+            self._event("state", tid, state="done", path=path)
+        except DownloadError as e:
+            new = "cancelled" if task._cancel.is_set() else "failed"
+            with self._lock:
+                self._state[tid] = new
+            self._event("state", tid, state=new, message=str(e))
+        except Exception as e:  # noqa: BLE001
+            with self._lock:
+                self._state[tid] = "failed"
+            self._event("state", tid, state="failed",
+                        message=f"{type(e).__name__}: {e}")
+        finally:
+            with self._lock:
+                self._running.pop(tid, None)
+                self._tasks.pop(tid, None)   # 终态后释放，长会话不涨内存
+            self._pump()

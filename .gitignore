@@ -1,0 +1,25 @@
+# 构建产物
+*.exe
+便携版/
+dist/
+build/
+*.spec
+
+# 打包备份（build_and_sign.py 自动生成）
+_backup_*/
+
+# 证书与私钥不入库
+signing/
+
+# 本地运行态
+__pycache__/
+*.pyc
+config.json
+*.corrupt
+*.parts/
+*.part
+
+# 临时产物
+~$*
+.DS_Store
+Thumbs.db

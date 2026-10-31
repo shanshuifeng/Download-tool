@@ -1,0 +1,38 @@
+# UTF-8
+#
+# 下载工具 版本信息资源
+# 由 PyInstaller --version-file 在打包时嵌入
+#
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          '080404b0',
+          [
+            StringStruct('CompanyName', '个人开发者'),
+            StringStruct('FileDescription', '下载工具 - 多线程分段下载器'),
+            StringStruct('FileVersion', '1.0.0.0'),
+            StringStruct('InternalName', 'DownloadTool'),
+            StringStruct('LegalCopyright', 'Copyright (C) 2026 个人开发者'),
+            StringStruct('OriginalFilename', '下载工具.exe'),
+            StringStruct('ProductName', '下载工具'),
+            StringStruct('ProductVersion', '1.0.0.0'),
+            StringStruct('Comments', '纯标准库多线程分段下载器，支持镜像测速、断点续传、哈希校验。')
+          ]
+        )
+      ]
+    ),
+    VarFileInfo([VarStruct('Translation', [2052, 1200])])
+  ]
+)
