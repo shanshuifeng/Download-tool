@@ -10,6 +10,9 @@
 调用方应当丢弃已有 `.part` 从头下载。
 
 分层约定：downloader 依赖 resume，resume 不得反向依赖。
+
+作者：shanshuifeng
+项目：https://github.com/shanshuifeng/Download-tool
 """
 
 from __future__ import annotations
@@ -53,10 +56,13 @@ def save(out: str, *, size: int, etag: str | None, url: str) -> None:
 def matches(meta: dict | None, size: int, etag: str | None) -> bool:
     """文件大小必须一致；双方都有 ETag 时再比 ETag。
 
+    指纹格式版本必须一致：将来改动格式后，旧指纹不能继续被当作有效。
     服务器不给 ETag 时只能退回比大小——这是本机制的天花板，
     调用方应打一条 warn 告诉用户「同长度变更检测不到」。
     """
-    if not meta or meta.get("size") != size:
+    if not meta or meta.get("version") != VERSION:
+        return False
+    if meta.get("size") != size:
         return False
     old = meta.get("etag")
     if old and etag:

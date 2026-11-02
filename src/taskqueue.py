@@ -7,6 +7,9 @@
 
 分层约定：taskqueue 依赖 downloader，不得反向依赖；
 界面层同时依赖 downloader（人类可读格式化）与 taskqueue（调度）。
+
+作者：shanshuifeng
+项目：https://github.com/shanshuifeng/Download-tool
 """
 
 from __future__ import annotations
@@ -133,11 +136,13 @@ class DownloadQueue:  # @contract CORE-016
                 self._state[tid] = "done"
             self._event("state", tid, state="done", path=path)
         except DownloadError as e:
-            new = "cancelled" if task._cancel.is_set() else "failed"
+            new = "cancelled" if task.cancelled else "failed"
             with self._lock:
                 self._state[tid] = new
             self._event("state", tid, state=new, message=str(e))
-        except Exception as e:  # noqa: BLE001
+        except BaseException as e:  # noqa: BLE001
+            # 含 KeyboardInterrupt / SystemExit：必须落终态并归还并发槽，
+            # 否则任务永远停在 running，队列槽位也被占住
             with self._lock:
                 self._state[tid] = "failed"
             self._event("state", tid, state="failed",

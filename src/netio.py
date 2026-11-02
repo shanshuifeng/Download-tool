@@ -6,6 +6,9 @@
 带超时与 UA 的 _request。上层只关心 URL，不关心走的是直连还是隧道。
 
 分层约定：downloader 依赖 netio，netio 不得反向依赖 downloader。
+
+作者：shanshuifeng
+项目：https://github.com/shanshuifeng/Download-tool
 """
 
 from __future__ import annotations

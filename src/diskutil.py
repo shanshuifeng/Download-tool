@@ -9,6 +9,9 @@
 （UNC 路径、无权限、非 Windows）一律放行，由真正的写入去承担后果。
 
 分层约定：downloader 依赖 diskutil，diskutil 不得反向依赖。
+
+作者：shanshuifeng
+项目：https://github.com/shanshuifeng/Download-tool
 """
 
 from __future__ import annotations

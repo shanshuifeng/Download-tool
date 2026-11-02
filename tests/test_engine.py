@@ -11,6 +11,9 @@
 
 运行：
     python -m unittest discover -s tests -v
+
+作者：shanshuifeng
+项目：https://github.com/shanshuifeng/Download-tool
 """
 
 from __future__ import annotations

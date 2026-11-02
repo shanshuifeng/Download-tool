@@ -7,6 +7,9 @@
 
 运行：
     python -m unittest discover -s tests -v
+
+作者：shanshuifeng
+项目：https://github.com/shanshuifeng/Download-tool
 """
 
 from __future__ import annotations
@@ -116,6 +119,51 @@ class GuiTest(unittest.TestCase):
             app.rows.pop(tid)
         app.listwrap.pack_forget()
         app._list_shown = False
+
+    # ---------------- BUG-38 · 剪贴板不得覆盖用户正在输入的内容 ----------------
+
+    def test_bug38_clipboard_not_filled_in_focus_gap(self):
+        """BUG-38 已聚焦但尚未输入时，剪贴板不得自动填入（空窗窗口）。REQ-023 接管状态机。"""
+        app = self.app
+        app.txt_url.delete("1.0", "end")
+        app.txt_url.insert("1.0", "https://…")
+        app.txt_url.tag_add("ph", "1.0", "end")
+
+        # 模拟 <FocusIn>：占位符被清掉，文本为空且没有 ph 标签
+        app._clear_placeholder()
+        self.assertEqual(app.txt_url.get("1.0", "end").strip(), "",
+                         "前置条件不成立：占位符没被清掉")
+        self.assertFalse(app.txt_url.tag_ranges("ph"),
+                         "前置条件不成立：ph 标签没被移除")
+        self.assertTrue(app._url_touched, "用户接管状态没有置位")
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append("https://example.com/gap.zip")
+        app._watch_clip()
+
+        self.assertNotIn("gap.zip", app.txt_url.get("1.0", "end"),
+                         "空窗窗口里剪贴板覆盖了用户的输入框")
+
+    def test_bug38_clipboard_fills_again_after_focusout(self):
+        """BUG-38 用户离开输入框且没留下内容时，剪贴板恢复自动填入。"""
+        app = self.app
+        # 清掉上次的输入记录，保证 FocusOut 走「文本为空」的分支
+        app.cfg["last_url"] = ""
+        app.txt_url.delete("1.0", "end")
+        app.txt_url.insert("1.0", "https://…")
+        app.txt_url.tag_add("ph", "1.0", "end")
+
+        app._clear_placeholder()        # <FocusIn>：接管
+        self.assertTrue(app._url_touched)
+        app._restore_placeholder()      # <FocusOut> 且文本为空：释放
+        self.assertFalse(app._url_touched, "接管状态没有复位")
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append("https://example.com/again.zip")
+        app._watch_clip()
+
+        self.assertIn("again.zip", app.txt_url.get("1.0", "end"),
+                      "用户离开后剪贴板不再填入，功能退化了")
 
     def test_bug02_clear_finished(self):
         """BUG-02 清除已完成后，行、列表与底部统计必须一起复位。"""

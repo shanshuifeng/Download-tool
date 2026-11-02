@@ -12,14 +12,16 @@ downloader.py —— 通用多线程分段下载引擎（纯标准库）
   5. 下载完成后做哈希校验（"任务校验要求为 {0}" / "{0} 文件校验失败"）。
   6. 线程数不是越多越好（"设置过多的下载线程" / "否则不建议设置更多的线程数"）。
 
-命令行用法：
-    python downloader.py <URL> [-o 保存目录或文件] [-t 线程数] [--sha256 值] [--mirror 额外镜像...]
+本模块是**纯引擎**，不含命令行入口：参数解析统一在 `dl.py`（契约 CLI-010）。
 
 作为库使用：
     from downloader import DownloadTask
     t = DownloadTask(urls=[...], out_path=r"D:\\a.zip", threads=16,
                      sha256=None, log=print, progress=cb)
     t.run()
+
+作者：shanshuifeng
+项目：https://github.com/shanshuifeng/Download-tool
 """
 
 from __future__ import annotations
@@ -29,23 +31,19 @@ import json
 import os
 import queue
 import random
-import re
 import shutil
 import sys
 import threading
 import time
-import urllib.parse
 
 import diskutil
+import naming
 import resume
-from netio import _opener, _probe_error_hint, _request  # noqa: F401  _opener 供测试引用
-
-# GitHub release 直连在国内基本不可用，按实测速度排序的可用镜像
-GITHUB_MIRRORS = [
-    "https://gh-proxy.com/",
-    "https://ghfast.top/",
-    "https://ghproxy.net/",
-]
+from httpinfo import (http_code, is_permanent_http_error, probe,  # noqa: F401  probe 再导出
+                      range_rejected)
+from mirrors import (build_mirror_urls,  # noqa: F401  公开符号再导出
+                    expand_mirror_urls, is_github_release)
+from netio import _opener, _request  # noqa: F401  _opener 供测试引用
 
 BLOCK = 256 * 1024          # 单次读取块
 MIN_CHUNK = 1 * 1024 * 1024  # 单片最小 1MB
@@ -53,6 +51,11 @@ MAX_CHUNK = 32 * 1024 * 1024  # 单片最大 32MB
 SLOW_BYTES = 15 * 1024      # 低于 15KB/s
 SLOW_WINDOW = 12            # 持续 12 秒判定为慢链
 MAX_RETRY = 6
+
+# 命令行退出码（CLI-002）。放在引擎层，异常才能自带退出码，
+# 命令行入口不必再依据错误文案判定。
+EXIT_FAIL = 1
+EXIT_NO_MIRROR = 3
 
 _HASH_BY_LEN = {32: "md5", 40: "sha1", 64: "sha256", 128: "sha512"}
 
@@ -71,7 +74,15 @@ def _path_lock(path: str) -> threading.Lock:  # @contract CORE-019
 
 
 class DownloadError(Exception):
-    pass
+    """对外唯一的异常类型。
+
+    code 为命令行退出码（CLI-002），缺省为 1；命令行入口直接取用该字段，
+    不再通过错误文案判断失败类型。
+    """
+
+    def __init__(self, message: str, code: int = EXIT_FAIL):
+        super().__init__(message)
+        self.code = code
 
 
 class _RateLimiter:  # @contract CORE-014
@@ -113,132 +124,36 @@ def human(n: float) -> str:
     return f"{n:.1f}GB"
 
 
+def _credited(size: int, want: int) -> int:  # @contract CORE-025
+    """分片计入进度的字节数。超过期望的一分不算：这片无效，必须整片重下。
+
+    进度与合并校验必须同源，否则会出现「进度满格然后失败」（BUG-32）。
+    """
+    return size if 0 <= size <= want else 0
+
+
 def _write(f, buf: bytes) -> None:
     """唯一的写盘点。抽出来是为了让「磁盘满」这条路径能被测试注入。"""
     f.write(buf)
 
 
-def is_github_release(url: str) -> bool:
-    return "github.com" in url and ("/releases/download/" in url or "/raw/" in url)
-
-
-def build_mirror_urls(url: str) -> list[str]:  # @contract CORE-007
-    """给 GitHub 链接自动补上加速镜像候选；普通链接原样返回。"""
-    urls = [url]
-    if is_github_release(url) and not any(m in url for m in GITHUB_MIRRORS):
-        for m in GITHUB_MIRRORS:
-            urls.append(m + url)
-    return urls
-
-
-
-def probe(url: str, timeout=15, proxy=None):  # @contract CORE-006
-    """探测：最终 URL、文件大小、是否支持 Range、建议文件名、续传指纹。
-
-    失败时在返回值的 error 字段里带上原因，供上层给出可操作的提示。
-    """
-    size, ranges, final, name, etag = None, False, url, None, None
-    errors = []
-
-    # 先试 HEAD
-    try:
-        with _request(url, "HEAD", timeout=timeout, proxy=proxy) as r:
-            final = r.geturl()
-            cl = r.headers.get("Content-Length")
-            ar = (r.headers.get("Accept-Ranges") or "").lower()
-            size = int(cl) if cl and cl.isdigit() else None
-            ranges = ar == "bytes"
-            name = _filename(r.headers, final)
-            etag = _etag_of(r.headers)
-    except Exception as e:
-        errors.append(e)
-
-    # HEAD 不被支持或被拒绝时，用 1 字节 Range 探测
-    if size is None or not ranges:
-        try:
-            with _request(url, "GET", {"Range": "bytes=0-0"},
-                          timeout=timeout, proxy=proxy) as r:
-                final = r.geturl()
-                cr = r.headers.get("Content-Range") or ""
-                m = re.search(r"/(\d+)", cr)
-                if m:
-                    size = int(m.group(1))
-                    ranges = True
-                elif size is None:
-                    cl = r.headers.get("Content-Length")
-                    size = int(cl) if cl and cl.isdigit() else None
-                name = _filename(r.headers, final) or name
-                etag = etag or _etag_of(r.headers)
-        except Exception as e:
-            errors.append(e)
-
-    err = None
-    if size is None:
-        # 0 字节是合法大小，不能用真值判断——GitHub 上的 .gitkeep / 空 __init__.py
-        # 全是 Content-Length: 0（BUG-01）
-        # 优先报 HTTP 状态类错误（信息量最大），否则报第一个
-        http_errs = [e for e in errors if re.search(r"HTTP Error \d{3}", str(e))]
-        pick = (http_errs or errors or [None])[0]
-        err = _probe_error_hint(url, pick) if pick else "无法获取文件大小，服务器可能不支持该请求"
-
-    return {"url": final, "size": size, "ranges": ranges, "name": name,
-            "etag": etag, "error": err}
-
-
-def _etag_of(headers) -> str | None:
-    """续传指纹：优先 ETag，退回 Last-Modified。"""
-    return headers.get("ETag") or headers.get("Last-Modified")
-
-
-_WIN_BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-_WIN_RESERVED = {"con", "prn", "aux", "nul"} | {
-    f"{p}{i}" for p in ("com", "lpt") for i in range(1, 10)}
-
-
 def _safe_name(name: str) -> str | None:
-    """把服务器给的文件名变成能安全落盘的名字。
-
-    只取最后一段（挡 ../ 穿越）、替换 Windows 非法字符、避开保留设备名。
-    返回 None 表示这个名字不可用，调用方应退回默认名。
-    """
-    if not name:
-        return None
-    base = os.path.basename(name.replace("\\", "/")).strip().strip(".")
-    base = _WIN_BAD.sub("_", base).strip()
-    if not base or base in (".", ".."):
-        return None
-    if base.split(".")[0].lower() in _WIN_RESERVED:
-        base = "_" + base
-    return base[:120]
+    """落盘安全文件名。实现见 naming.safe_name，此处只保留旧名以兼容既有引用。"""
+    return naming.safe_name(name)
 
 
 def _fallback_name(url: str) -> str:
-    """服务器没给文件名时，用 URL 派生稳定名，避免多个任务都叫 download.bin。"""
-    h = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
-    return f"download_{h}.bin"
+    """按 URL 派生的稳定文件名。实现见 naming.fallback_name。"""
+    return naming.fallback_name(url)
 
 
 def _filename(headers, url) -> str | None:
-    cd = headers.get("Content-Disposition") or ""
-    m = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?", cd, re.I)
-    if m:
-        got = _safe_name(urllib.parse.unquote(m.group(1).strip()))
-        if got:
-            return got
-    path = urllib.parse.urlparse(url).path
-    base = _safe_name(urllib.parse.unquote(os.path.basename(path)))
-    if base:
-        if "." in base:
-            return base
-        # 无扩展名但看起来像正常文件名（如 SHA256SUMS）也照用
-        if re.fullmatch(r"[\w\-.]+", base) and len(base) > 3:
-            return base
-    return None
+    """从响应头与 URL 取文件名。实现见 naming.filename_from。"""
+    return naming.filename_from(headers, url)
 
 
 def _measure_mirror(u: str, proxy=None) -> dict:
     """单源测速：探测元信息 + 拉 256KB 量吞吐。"""
-    t0 = time.time()
     info = probe(u, proxy=proxy)
     if info["size"] is None:
         return {"url": u, "info": info, "speed": 0.0, "failed": True}
@@ -249,6 +164,9 @@ def _measure_mirror(u: str, proxy=None) -> dict:
     try:
         with _request(u, "GET", {"Range": "bytes=0-262143"},
                       timeout=12, proxy=proxy) as r:
+            # 计时从响应头到达后开始：DNS/连接/TLS/探测耗时不计入分母，
+            # 它们与源快慢无关（BUG-34）。首字节延迟仍计入。
+            t0 = time.time()
             # 只读固定窗口：源忽略 Range 时 r.read() 会把整个文件读进内存（BUG-17）
             got, limit = 0, 256 * 1024
             while got < limit:
@@ -349,7 +267,8 @@ def _backoff(attempt: int) -> float:  # @contract CORE-006
 class DownloadTask:
     def __init__(self, urls, out_path=None, threads=16, sha256=None,
                  log=None, progress=None, verify_hash=None,
-                 chunk_mb=None, slow_kb=15, slow_sec=12, retries=6, timeout=30,
+                 chunk_mb=None, slow_kb=SLOW_BYTES // 1024,
+                 slow_sec=SLOW_WINDOW, retries=MAX_RETRY, timeout=30,
                  proxy=None, max_speed_kb=0):
         self.urls = list(urls)
         self.out_path = out_path
@@ -380,13 +299,19 @@ class DownloadTask:
         self.actual_hash = None        # 校验时算出的值，供 dl.py 复用（BUG-09）
         self.hash_algo = None
         self._floor_kb = self.slow_kb  # 动态慢速下限，由 reporter 抬升
-        self._no_range = False         # 有源声称支持分段却回 200
+        self._no_range_mirrors = set()   # 观测到「忽略 Range」的镜像下标
+        self._all_no_range = False       # 全部镜像都忽略 Range 时才退化为单线程
         self._fatal = None             # 磁盘满这类不可重试错误，由 worker 抛出
 
     # ---------- 公共 ----------
     def cancel(self):
         self._cancel.set()
         self._stop.set()
+
+    @property
+    def cancelled(self) -> bool:
+        """是否已请求取消。队列等外部代码只读此公开属性，不触碰 `_cancel`。"""
+        return self._cancel.is_set()
 
     def log(self, msg, level="info"):
         try:
@@ -407,8 +332,9 @@ class DownloadTask:
     # ---------- 主流程 ----------
     def run(self):
         self.log("解析链接…")
-        ranked = rank_mirrors(self.urls, log=lambda m: self.log(m),
-                              proxy=self.proxy)
+        # 所有入口统一在这里补加速源，界面与命令行的行为因此一致（CORE-007）
+        ranked = rank_mirrors(expand_mirror_urls(self.urls),
+                              log=lambda m: self.log(m), proxy=self.proxy)
         ok = [r for r in ranked if not r.get("failed")]
         if not ok:
             # 汇总所有源的真实原因，给出可操作的提示
@@ -418,7 +344,9 @@ class DownloadTask:
                 if e and e not in reasons:
                     reasons.append(e)
             detail = "；".join(reasons) if reasons else "未能获取文件大小"
-            raise DownloadError(f"所有下载源都不可用\n  原因：{detail}\n  建议：检查链接是否有效、是否需要登录，或换一个下载源")
+            raise DownloadError(
+                f"所有下载源都不可用\n  原因：{detail}\n  建议：检查链接是否有效、是否需要登录，或换一个下载源",
+                code=EXIT_NO_MIRROR)
 
         best = ok[0]
         self.mirrors = [r["info"]["url"] for r in ok]
@@ -477,15 +405,16 @@ class DownloadTask:
             try:
                 self._download_chunked()
             except DownloadError:
-                # 探测说支持分段，实际所有源都忽略 Range：退化单线程，别留坏文件
-                if not self._no_range or self._cancel.is_set():
+                # 探测说支持分段，实际所有源都不给分段（忽略或拒绝 Range）：
+                # 退化单线程，别留坏文件。
+                # 只有一个源如此时不能退化——部分源不支持分段不应作废已下载的分片
+                if not self._all_no_range or self._cancel.is_set():
                     raise
-                self.log("所有源都忽略了 Range 请求，退化单线程重下", "warn")
+                self.log("所有源都不支持分段（忽略或拒绝 Range），退化单线程重下", "warn")
                 shutil.rmtree(self.out_path + ".parts", ignore_errors=True)
                 self._errors.clear()
                 with self._lock:
                     self._done = 0
-                self._no_range = False
                 self._download_single(self.mirrors[0])
         else:
             self._download_single(best_url)
@@ -517,7 +446,8 @@ class DownloadTask:
             elif not self.etag:
                 self.log("服务器未提供 ETag，续传无法检测同长度变更", "warn")
         with self._lock:
-            self._done = have
+            # 夹到总长以内：percent 不得越过 100%（CORE-025）
+            self._done = min(have, self.size) if self.size else have
         headers = {"Range": f"bytes={have}-"} if have else {}
         try:
             with _request(url, "GET", headers, timeout=self.timeout,
@@ -529,7 +459,7 @@ class DownloadTask:
                     # 服务器忽略了 Range，响应是完整文件：丢掉已下部分，从头覆盖写
                     self.log("服务器忽略了 Range 请求，从头重下", "warn")
                     with self._lock:
-                        self._done -= have
+                        self._done = 0
                     have, mode = 0, "wb"
                 if not have:
                     # 落盘前先写指纹：写一半断电，下次也能判断这份 .part 属于谁
@@ -543,11 +473,14 @@ class DownloadTask:
                         buf = r.read(BLOCK)
                         if not buf:
                             break
-                        _write(f, buf)
                         if self._limiter:
+                            # 先取配额再落盘：限速作用于真正写下去的字节（CORE-014）
                             self._limiter.acquire(len(buf))
+                        _write(f, buf)
                         with self._lock:
-                            self._done += len(buf)
+                            # 夹到总长以内：percent 不得越过 100%（CORE-025）
+                            self._done = min(self._done + len(buf), self.size) \
+                                if self.size else self._done + len(buf)
                         now = time.time()
                         if now - t_last >= 0.5:
                             sp = (self._done - n_last) / (now - t_last)
@@ -607,11 +540,11 @@ class DownloadTask:
             json.dump({"size": self.size, "chunks": chunks,
                        "mirrors": self.mirrors, "etag": self.etag}, f)
 
-        # 统计已有进度
+        # 统计已有进度。超长片计 0：它无效，必须整片重下（BUG-32/33）
         for i, (s, e) in enumerate(chunks):
             p = os.path.join(parts_dir, f"part{i:04d}")
             if os.path.exists(p):
-                self._done += min(os.path.getsize(p), e - s + 1)
+                self._done += _credited(os.path.getsize(p), e - s + 1)
 
         assign = _distribute(self.mirror_speeds, len(chunks))
         self.log(f"分 {len(chunks)} 片，每片约 {human(chunk)}，并发 {workers} 线程")
@@ -632,7 +565,7 @@ class DownloadTask:
                 last[0], last[1] = cur, now
                 ema = sp if ema == 0 else ema * 0.6 + sp * 0.4
                 # 动态慢速下限：全局够快时才抬高，且只升不降，避免来回抖。
-                # 开了全局限速时不判定慢链，否则正常分片会被限速本身误杀。
+                # 开了每任务限速时不判定慢链，否则正常分片会被限速本身误杀。
                 if self.slow_kb and not self._limiter:
                     floor = _next_floor(self.slow_kb, ema)
                     if floor > self._floor_kb:
@@ -710,6 +643,11 @@ class DownloadTask:
     def _worker(self, idx, start, end, parts_dir, mirror_idx=0):  # @contract CORE-011
         path = os.path.join(parts_dir, f"part{idx:04d}")
         want = end - start + 1
+        permanent = set()   # 本片已确认「永久失败」的源下标：换源也没救
+        # 本片当前计入进度的字节数：与 self._done 同口径，且等于
+        # _credited(本片当前长度, want)（CORE-025）。续传扫描时已按同一
+        # 口径计过，这里接着算，不重复计入。
+        credited = _credited(os.path.getsize(path) if os.path.exists(path) else 0, want)
         for attempt in range(self.retries + 1):
             if self._cancel.is_set():
                 return
@@ -717,6 +655,10 @@ class DownloadTask:
             if have > want:
                 # 超长说明这个分片不属于当前区间（被别人写过/上次异常）。
                 # 截断只会保住前面的垃圾字节，静默产出坏文件；必须整片重下
+                with self._lock:
+                    # 计入与扣减走同一个函数：口径不会分叉（BUG-33）
+                    self._done -= _credited(have, want)
+                credited = 0
                 try:
                     os.remove(path)
                 except OSError:
@@ -724,7 +666,8 @@ class DownloadTask:
                 have = 0
             if have >= want:
                 return
-            url = self.mirrors[(mirror_idx + attempt) % len(self.mirrors)]
+            url_idx = (mirror_idx + attempt) % len(self.mirrors)
+            url = self.mirrors[url_idx]
             headers = {"Range": f"bytes={start + have}-{end}"}
             try:
                 with _request(url, "GET", headers, timeout=self.timeout,
@@ -732,9 +675,13 @@ class DownloadTask:
                     if r.status not in (200, 206):
                         raise DownloadError(f"HTTP {r.status}")
                     if r.status == 200 and (have > 0 or want != self.size):
-                        # 声称支持分段却回了整文件：继续 append 会写出超长分片
-                        self._no_range = True
+                        # 声称支持分段却回了整文件：继续 append 会写出超长分片。
+                        # 记录该源忽略 Range 后换源重试；全部源都如此才整体退化
+                        with self._lock:
+                            self._no_range_mirrors.add(url_idx)
                         raise DownloadError("服务器忽略了 Range 请求")
+                    size = have       # 本片当前在磁盘上的字节数
+                    overflow = False
                     with open(path, "ab") as f:
                         got, t0 = 0, time.time()
                         while True:
@@ -743,28 +690,74 @@ class DownloadTask:
                             buf = r.read(BLOCK)
                             if not buf:
                                 break
+                            if size + len(buf) > want:
+                                # 该源返回的数据超出本片区间：多出的部分属于
+                                # 别的分片，落盘即污染本片。先判后写，整片重下
+                                overflow = True
+                                break
+                            if self._limiter:
+                                # 先取配额再落盘：限速作用于真正写下去的字节（CORE-014）
+                                self._limiter.acquire(len(buf))
                             _write(f, buf)
                             got += len(buf)
-                            if self._limiter:
-                                self._limiter.acquire(len(buf))
+                            size += len(buf)
+                            new_credit = _credited(size, want)
                             with self._lock:
-                                self._done += len(buf)
+                                self._done += new_credit - credited
+                            credited = new_credit
                             el = time.time() - t0
                             if (self.slow_kb and not self._limiter and el > self.slow_sec
                                     and got / el < self._floor_kb * 1024):
                                 raise DownloadError("速度过慢，切换下载源")
+                    if overflow:
+                        # 整片作废并回退进度：与计入同源，口径不分叉（CORE-025）
+                        with self._lock:
+                            self._done -= _credited(size, want)
+                        credited = 0
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                        raise DownloadError("服务器返回的数据超出分片范围")
                     if os.path.getsize(path) >= want:
                         return
             except Exception as e:
                 if diskutil.is_disk_full(e):   # @contract CORE-022
                     # 磁盘满不是网络问题，重试只会让用户多等 30 秒（BUG-10）
-                    self._fatal = DownloadError(
-                        "磁盘空间不足，下载已中止（已下载的分片保留）")
+                    with self._lock:
+                        self._fatal = DownloadError(
+                            "磁盘空间不足，下载已中止（已下载的分片保留）")
                     return
+                if range_rejected(e):   # @contract CORE-024
+                    # 416：服务器按 RFC 7233 拒绝了 Range，等同于「该源不支持分段」
+                    with self._lock:
+                        self._no_range_mirrors.add(url_idx)
+                        all_bad = len(self._no_range_mirrors) >= len(self.mirrors)
+                        if all_bad:
+                            self._all_no_range = True
+                            # 与磁盘满同一条通路：分片阶段到此为止，交给 _fetch 退化
+                            self._fatal = DownloadError("所有下载源都拒绝了 Range 请求")
+                    if all_bad:
+                        return
+                    self.log(f"  分片{idx} 第{attempt+1}次失败（该源不支持分段），换源重试", "warn")
+                    continue
+                if is_permanent_http_error(e):   # @contract CORE-024
+                    # 401/403/404 这类错误重试也没用，但换源可能有效：不退避，直接换
+                    permanent.add(url_idx)
+                    if len(permanent) >= len(self.mirrors):
+                        self.log(f"  分片{idx} 失败（HTTP {http_code(e)}，换源也无法解决）", "warn")
+                        with self._lock:
+                            self._errors.append(idx)
+                        return
+                    self.log(f"  分片{idx} 第{attempt+1}次失败（HTTP {http_code(e)}），换源重试", "warn")
+                    continue
                 self.log(f"  分片{idx} 第{attempt+1}次失败（{e}），换源重试", "warn")
                 # 指数退避 + 抖动：避免多分片同时重连打爆服务端
                 time.sleep(_backoff(attempt))
-        self._errors.append(idx)
+        with self._lock:
+            if len(self._no_range_mirrors) >= len(self.mirrors):
+                self._all_no_range = True
+            self._errors.append(idx)
 
     # ---------- 校验 ----------
     def _quarantine(self, reason: str) -> str:
@@ -818,58 +811,8 @@ class DownloadTask:
         self.log(f"{algo.upper()} 校验通过", "ok")
 
 
-# ---------------- CLI ----------------
-def main(argv=None):
-    import argparse
-    ap = argparse.ArgumentParser(description="多线程分段下载器")
-    ap.add_argument("url", help="下载链接（可多次传入作为镜像）")
-    ap.add_argument("-o", "--out", help="保存目录或完整文件路径")
-    ap.add_argument("-t", "--threads", type=int, default=16, help="线程数（默认 16）")
-    ap.add_argument("--sha256", help="期望的哈希（sha256/sha1/md5 自动识别）")
-    ap.add_argument("--mirror", action="append", default=[], help="额外镜像前缀或完整地址")
-    ap.add_argument("--chunk", type=int, default=None, help="每片大小 MB（默认自动均分）")
-    ap.add_argument("--slow", type=int, default=15, help="慢速阈值 KB/s，0 关闭（默认 15）")
-    ap.add_argument("--slow-sec", type=int, default=12, help="慢速持续秒数（默认 12）")
-    ap.add_argument("--retries", type=int, default=6, help="单片重试次数（默认 6）")
-    ap.add_argument("--timeout", type=int, default=30, help="连接超时秒数（默认 30）")
-    a = ap.parse_args(argv)
-
-    urls = [a.url]
-    for m in a.mirror:
-        urls.append(m + a.url if m.endswith("/") and a.url.startswith("http") else m)
-    urls = build_mirror_urls(a.url) + [u for u in urls[1:] if u not in build_mirror_urls(a.url)]
-
-    last = [0.0]
-
-    def prog(d):
-        now = time.time()
-        if now - last[0] < 0.5 and d["phase"] == "downloading":
-            return
-        last[0] = now
-        if d["phase"] == "downloading":
-            eta = ""
-            if d["speed"] > 0 and d["total"]:
-                s = int((d["total"] - d["done"]) / d["speed"])
-                eta = f"  剩余 {s//60:02d}:{s%60:02d}"
-            print(f"\r  {d['percent']:5.1f}%  {human(d['done'])}/{human(d['total'])}  "
-                  f"{human(d['speed'])}/s{eta}   ", end="", flush=True)
-
-    t = DownloadTask(urls, a.out, a.threads, a.sha256,
-                     log=lambda m, lv="info": print(f"[{lv}] {m}"), progress=prog,
-                     chunk_mb=a.chunk, slow_kb=a.slow, slow_sec=a.slow_sec,
-                     retries=a.retries, timeout=a.timeout)
-    try:
-        p = t.run()
-        print(f"\n已保存：{p}")
-        return 0
-    except DownloadError as e:
-        print(f"\n失败：{e}")
-        return 1
-    except KeyboardInterrupt:
-        t.cancel()
-        print("\n已中断")
-        return 130
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+# ---------------- 引擎不是入口 ----------------
+# 命令行能力统一收敛到 dl.py（CLI-010）。这里保留守卫只是为了让直接运行
+# 本文件的人看到明确指引，而不是「静默成功」（BUG-30）。
+if __name__ == "__main__":      # @contract CLI-010
+    sys.exit("命令行入口已收敛到 dl.py，请改用：python src/dl.py --help")

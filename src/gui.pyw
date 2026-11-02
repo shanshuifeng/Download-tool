@@ -6,6 +6,9 @@
 
 DPI：进程声明 per-monitor 感知后再建窗口，并按 DPI 比例缩放所有像素尺寸，
 否则 Windows 会把整个窗口当位图放大，文字和细线全糊。
+
+作者：shanshuifeng
+项目：https://github.com/shanshuifeng/Download-tool
 """
 
 import json
@@ -34,6 +37,63 @@ SCALE = max(1.0, _REAL_DPI / 96.0)
 def S(v):
     """逻辑像素 → 物理像素"""
     return int(round(v * SCALE))
+
+
+def _process_name(k32, pid):
+    """取进程的可执行文件名（小写）；拿不到返回 None。"""
+    import ctypes
+
+    handle = k32.OpenProcess(0x1000, False, pid)    # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        size = ctypes.c_uint32(1024)
+        buf = ctypes.create_unicode_buffer(1024)
+        if k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return os.path.basename(buf.value).lower()
+    finally:
+        k32.CloseHandle(handle)
+    return None
+
+
+def _hide_own_console():
+    """双击启动时藏掉随附的控制台窗口；从终端启动时不动用户的终端。
+
+    判据：控制台里挂着的进程如果全是我们自己（onefile 的引导进程 + 子进程），
+    这个控制台就是为双击新建的；只要混进 cmd / powershell / bash，就是用户的终端。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        # 不声明 restype 的话 64 位下 HANDLE 会被截成 32 位
+        k32.GetConsoleWindow.restype = ctypes.c_void_p
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        k32.QueryFullProcessImageNameW.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_ulong)]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        k32.GetConsoleProcessList.argtypes = [
+            ctypes.POINTER(ctypes.c_ulong), ctypes.c_ulong]
+
+        hwnd = k32.GetConsoleWindow()
+        if not hwnd:
+            return
+        slots = 8
+        buf = (ctypes.c_ulong * slots)()
+        count = k32.GetConsoleProcessList(buf, slots)
+        if not count or count > slots:
+            return
+        me = os.path.basename(sys.executable).lower()
+        for i in range(count):
+            if _process_name(k32, buf[i]) != me:
+                return
+        ctypes.windll.user32.ShowWindow(hwnd, 0)    # SW_HIDE
+    except Exception:  # noqa: BLE001  藏窗口失败不影响下载
+        pass
 
 
 if getattr(sys, "frozen", False):
@@ -466,6 +526,7 @@ class App:
         self.q = queue.Queue()
         self.rows = {}
         self._clip_seen = ""
+        self._url_touched = False   # 用户是否已接管输入框（GUI-011）
         self._list_shown = False
         self._clear_shown = False
         self.queue = DownloadQueue(
@@ -604,7 +665,7 @@ class App:
             ("慢速时长", "slow_sec", 3, 60, 1, lambda v: f"{v} 秒"),
             ("重试", "retries", 0, 20, 1, lambda v: f"{v} 次"),
             ("超时", "timeout", 5, 120, 5, lambda v: f"{v} 秒"),
-            ("限速", "max_speed_kb", 0, 10240, 128,
+            ("每任务限速", "max_speed_kb", 0, 10240, 128,
              lambda v: "不限" if v == 0 else f"{v} KB/s"),
             ("并发任务", "concurrent", 1, 4, 1, lambda v: f"{v} 个"),
         ]
@@ -664,6 +725,9 @@ class App:
     def _restore_placeholder(self):
         if self.txt_url.get("1.0", "end").strip():
             return
+        # 文本为空：用户已离开输入框且没留下内容，视为未接管，
+        # 剪贴板恢复自动填入（GUI-011）
+        self._url_touched = False
         last = self.cfg.get("last_url", "").strip()
         if last:
             self.txt_url.insert("1.0", last)
@@ -673,6 +737,9 @@ class App:
             self.txt_url.tag_configure("ph", foreground=PLACEHOLDER)
 
     def _clear_placeholder(self, _=None):
+        # 用户点进输入框即视为接管：此后剪贴板不得自动填入，
+        # 否则会覆盖用户正在输入的内容（GUI-011 / BUG-38）
+        self._url_touched = True
         if self.txt_url.tag_ranges("ph"):
             self.txt_url.delete("1.0", "end")
             self.txt_url.tag_remove("ph", "1.0", "end")
@@ -896,11 +963,12 @@ class App:
         return not self.txt_url.get("1.0", "end").strip()
 
     def _watch_clip(self, _=None):
-        """剪贴板里出现直链且输入框为空时自动填入；同一链接只提一次。"""
+        """剪贴板里出现直链且输入框未被接管时自动填入；同一链接只提一次。"""
         try:
             txt = self.root.clipboard_get().strip()
             if (txt != self._clip_seen and txt.startswith(("http://", "https://"))
                     and len(txt) < 2048 and "…" not in txt
+                    and not self._url_touched
                     and self._url_box_empty()):
                 self._clip_seen = txt
                 self.txt_url.delete("1.0", "end")
@@ -923,10 +991,21 @@ class App:
         self.root.after(80, self._drain)
 
 def main():
+    """唯一入口：有参数走命令行，没参数（或 --gui）开界面。
+
+    合并成一个 exe 后，脚本调用与双击使用的是同一个文件；
+    CLI 模式下控制台保持可见，GUI 模式下才尝试隐藏随附的控制台。
+    """
+    if len(sys.argv) > 1 and sys.argv[1] != "--gui":
+        from dl import main as cli_main
+        return cli_main(sys.argv[1:])
+
+    _hide_own_console()
     root = tk.Tk()
     App(root)
     root.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
