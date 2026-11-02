@@ -33,6 +33,14 @@ ZIP_DST = os.path.join(DIST, "下载工具_便携版.zip")
 
 
 def main() -> int:
+    # 产物名是中文，而 CI 的 Windows 控制台默认不是 UTF-8（cp1252/cp936 视镜像而定）。
+    # 不显式指定的话，print 会在最后一步抛 UnicodeEncodeError，让整个发布失败——
+    # 文件其实已经复制好了，只是「报个结果」这一步炸了。build_and_sign.py 里
+    # 用的是同一套办法。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     os.makedirs(DIST, exist_ok=True)
 
     if not os.path.isfile(EXE_SRC):

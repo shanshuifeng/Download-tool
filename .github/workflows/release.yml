@@ -39,6 +39,8 @@ jobs:
       # 就被破坏，上传后变成 default.exe / _.zip。Python 全程 Unicode，无此问题。
       - name: 收集产物
         run: python tools/collect_artifacts.py
+        env:
+          PYTHONIOENCODING: utf-8
 
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
