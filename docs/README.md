@@ -75,3 +75,38 @@ python -m unittest discover -s tests
 ```
 
 两项都必须全绿，且**不允许出现 SKIP**——静默跳过的检查等同于没有检查。
+
+## 发布
+
+```bash
+git tag -a v1.3.0 -m "v1.3.0"
+git push origin master
+git push origin v1.3.0
+```
+
+推送标签触发 `.github/workflows/release.yml`：按 tag 渲染版本资源 → 打包 → 收集产物 → 发布 Release。版本号因此只有 tag 一个来源，不需要改任何文件。CI 亦在每次推送与合并请求时执行契约校验与测试。
+
+产物在 Windows runner 上构建，两条经验写在代码里，改动发布链路时不要退回：
+
+- **资产名必须是 ASCII**。带中文的文件名会在上传环节被代码页丢弃（`下载工具_便携版.zip` 曾变成 `_.zip`，页面显示的却仍是中文——那是 `label`，不是真实文件名）。
+- **收集产物用 Python 而非 shell**。同名逻辑经 shell 时会在解析阶段就被破坏，且 Windows 控制台默认非 UTF-8，打印中文会抛异常让步骤失败。
+
+### 代码签名
+
+当前不签名。这不是省事，是权衡后的结论：
+
+- **自签名证书对公开分发没有帮助。** SmartScreen 仍会拦截，除非用户手动把证书导入受信任根——没有普通用户会这么做。微软的分类里它属于「Dev/testing only, or enterprise with managed certificate trust」。
+- **商业证书无法直接用于 CI。** 按 CA/B 论坛要求，2023 年起代码签名私钥必须存放在硬件或云 HSM，不能再以 `.pfx` 形式放进仓库或 Secrets。要在 CI 落地，需配套云签名服务。
+- **EV 不再有特殊待遇。** 2024 年起与 OV 在 SmartScreen 上无差别，都需要积累声誉。
+
+若将来要真实签名，可选路径：
+
+| 方案 | 成本 | 说明 |
+|---|---|---|
+| OV 证书 | 约 $150–300/年 | 全球可申请，需身份审核；CI 需配套云签名服务 |
+| EV 证书 | 约 $400+/年 | 与 OV 在 SmartScreen 上无差别 |
+| SignPath Foundation | 免费（开源项目） | 基金会持证并代签，发布者显示为 SignPath Foundation，每次发版需人工批准 |
+| Azure Artifact Signing | 约 $10/月 | 个人开发者仅限美国与加拿大 |
+| Microsoft Store (MSIX) | 免费 | 商店代签，无 SmartScreen 提示，但需按 MSIX 打包并过审 |
+
+在此之前，完整性由 SHA-256 保障：GitHub 为每个资产计算摘要，用户可用 `certutil -hashfile` 核对。

@@ -149,34 +149,19 @@ python build_and_sign.py --version v1.3.0 # 指定版本号（缺省取最近的
 
 **版本号的唯一来源是 git tag。** `build/version_info.txt.in` 只是模板，打包时按 `--version` > `DLTOOL_VERSION` > 最近 tag 的顺序取值渲染，不在仓库里存具体版本号。
 
-## 发版
+## 关于「未知发布者」
 
-```bash
-git tag -a v1.3.0 -m "v1.3.0"
-git push origin master
-git push origin v1.3.0
-```
+发布的 exe **没有代码签名**，Windows 会提示「未知发布者」，这是预期现象，不是文件损坏或被篡改。
 
-推送标签即触发 GitHub Actions：打包、上传、发布 Release。CI 亦在每次推送与合并请求时执行契约校验与单元测试。
-
-## 代码签名与完整性校验
-
-当前发布的产物**未签名**，Windows 会显示「未知发布者」，这属预期现象。自签名证书对公开分发没有实际帮助：SmartScreen 仍会拦截，除非用户手动把证书导入受信任根。仓库不保存任何证书与私钥。
-
-若需要真实签名，可行路径见下（私钥按 CA/B 论坛要求须存放在硬件或云 HSM 中，因此无法直接把 `.pfx` 放进 CI）：
-
-| 方案 | 成本 | 说明 |
-|---|---|---|
-| OV 证书 | 约 $150–300/年 | 全球可申请，需身份审核；CI 签名需配套云签名服务 |
-| EV 证书 | 约 $400+/年 | 2024 年起与 OV 在 SmartScreen 上无差别，不再值得为此多付 |
-| SignPath Foundation | 免费（开源项目） | 由基金会持证并代签，发布者显示为 SignPath Foundation |
-| Azure Artifact Signing | 约 $10/月 | 个人开发者仅限美国与加拿大 |
-
-**校验下载文件**：GitHub 会为每个资产计算 SHA-256，可在 Release 页面或 API 的 `digest` 字段查看：
+想确认下载到的文件确实出自本仓库，核对 SHA-256 即可——GitHub 为每个资产计算了摘要，显示在 Release 页面：
 
 ```bash
 certutil -hashfile DownloadTool.exe SHA256
 ```
+
+与页面上的值一致，说明文件在传输过程中未被改动。若需要完全不依赖二进制，按上一节从源码构建。
+
+（不做签名的原因：自签名证书对公开分发没有帮助，SmartScreen 仍会拦截，除非用户手动把证书导入受信任根；商业证书的成本与流程见 `docs/README.md` 的「发布」一节。）
 
 ## 项目结构
 
