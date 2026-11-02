@@ -35,6 +35,10 @@ EXE_DST = os.path.join(DIST, "DownloadTool.exe")
 ZIP_SRC = os.path.join(ROOT, "build", "便携版", "下载工具_便携版.zip")
 ZIP_DST = os.path.join(DIST, "DownloadTool-portable.zip")
 
+# 公钥证书随产物分发：用户导入后即可验证签名来自同一主体
+CER_SRC = os.path.join(ROOT, "build", "signing", "DownloadTool_SelfSigned.cer")
+CER_DST = os.path.join(DIST, "DownloadTool.cer")
+
 
 def main() -> int:
     # 即便资产名是 ASCII，日志里仍会打印中文（如「便携包不存在」）。CI 的
@@ -57,6 +61,12 @@ def main() -> int:
         shutil.copy2(ZIP_SRC, ZIP_DST)
     else:
         print("便携包不存在，跳过:", ZIP_SRC, file=sys.stderr)
+
+    # 证书缺失不致命：未配置签名的构建本来就没有它
+    if os.path.isfile(CER_SRC):
+        shutil.copy2(CER_SRC, CER_DST)
+    else:
+        print("公钥证书不存在，跳过:", CER_SRC, file=sys.stderr)
 
     print("dist/ 内容：")
     for name in sorted(os.listdir(DIST)):

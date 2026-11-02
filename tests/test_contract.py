@@ -18,6 +18,7 @@ import contextlib
 import io
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -751,6 +752,57 @@ class ContractToolTest(unittest.TestCase):
             if left:
                 dead[path.name] = left
         self.assertEqual(dead, {}, f"死导入：{dead}")
+
+    def _tracked_text_files(self):
+        """仓库里会被公开的文本文件。用 git 的清单，而不是遍历目录——
+        只有纳入版本库的文件才会出现在 GitHub 上，这才是要检查的范围。"""
+        try:
+            out = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT,
+                                 capture_output=True, check=True).stdout
+            names = [n for n in out.decode("utf-8").split("\0") if n]
+        except (OSError, subprocess.CalledProcessError):
+            names = [p.relative_to(ROOT).as_posix()
+                     for p in ROOT.rglob("*")
+                     if p.is_file() and ".git" not in p.parts
+                     and not any(x in p.parts for x in ("build", ".workbuddy"))]
+        for name in names:
+            path = ROOT / name
+            if path.suffix.lower() in (".ico", ".png", ".zip", ".exe"):
+                continue
+            yield path
+
+    def test_repo_publishes_no_private_or_internal_content(self):
+        """公开仓库里不得出现本机路径、账户名与内部流程痕迹。
+
+        仓库是公开的：写进去的每个字读者都能看到，也可能被搜索引擎收录。
+        本机绝对路径会带出账户名；「本轮」「裁决」这类流程用语对读者是噪声。
+        两者都不会报错、不会被运行时发现，只能靠这条用例守住。
+        """
+        rules = [
+            (r"[A-Za-z]:[\\/]+Users[\\/]", "本机用户目录绝对路径"),
+            (r"/c/Users/", "Git Bash 风格的用户目录路径"),
+            (r"\bAdministrator\b", "本机账户名"),
+            (r"主理人|裁决|复评|复验|第[一二三四五]轮|本轮|这轮", "内部流程用语"),
+            (r"WorkBuddy|CodeBuddy|子代理|智能体", "内部工具痕迹"),
+        ]
+        # 用例自身要写出这些正则才能检查它们，因此跳过自己
+        skip = {Path(__file__).name}
+        problems = []
+        for path in self._tracked_text_files():
+            if path.name in skip:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                for pattern, why in rules:
+                    if re.search(pattern, line):
+                        problems.append(
+                            f"{path.relative_to(ROOT).as_posix()}:{lineno} "
+                            f"{why} → {line.strip()[:60]}")
+        self.assertEqual(problems, [],
+                         "公开仓库里出现了不该公开的内容：\n" + "\n".join(problems[:10]))
 
 
 if __name__ == "__main__":

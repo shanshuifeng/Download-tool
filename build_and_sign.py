@@ -305,8 +305,11 @@ def pack_portable(exe):
         src = os.path.join(HERE, n)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(PORTABLE, n))
+    # 公钥证书一并放进便携包：用户导入后即可验证签名来自同一主体
+    if os.path.isfile(CER):
+        shutil.copy2(CER, os.path.join(PORTABLE, "DownloadTool.cer"))
 
-    members = [n for n in ["下载工具.exe"] + names
+    members = [n for n in ["下载工具.exe", "DownloadTool.cer"] + names
                if os.path.isfile(os.path.join(PORTABLE, n))]
     zpath = os.path.join(PORTABLE, "下载工具_便携版.zip")
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
@@ -399,8 +402,11 @@ def main():
         deploy(exe)
 
     print("\n完成。")
-    print("提示：自签名证书未受信任根背书，别人电脑上仍显示「未知发布者」。")
-    print("      导入证书到「受信任的根证书颁发机构」后才会变绿：", CER)
+    if args.no_sign:
+        print("提示：本次未签名，Windows 会提示「未知发布者」。")
+    else:
+        print("提示：已用自签名证书签名，但证书未受信任根背书，")
+        print("      其他电脑上仍显示「未知发布者」。导入以下证书后才会显示发布者：", CER)
 
 
 if __name__ == "__main__":

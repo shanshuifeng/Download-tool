@@ -75,8 +75,18 @@ Windows 下的多线程分段下载器。界面与命令行共用同一个可执
 关于「未知发布者」
 ------------------------------------------------------------------------
 
-本程序未购买代码签名证书，Windows 会对所有未签名的 exe 显示该提示，
-属预期现象。可核对官方公布的 SHA-256 确认文件未被篡改：
+本程序使用自签名证书签名，签名者为 shanshuifeng。这张证书不是商业机构签发，
+Windows 默认不信任它，因此仍会提示「未知发布者」——属预期现象，不是文件损坏，
+也不代表文件被篡改。
+
+希望系统直接认可该签名，可把随包提供的 DownloadTool.cer 导入
+「受信任的根证书颁发机构」（只影响本机，可随时删除）：
+
+    Import-Certificate -FilePath DownloadTool.cer -CertStoreLocation Cert:\CurrentUser\Root
+
+导入后，由同一张证书签名的版本会显示发布者为 shanshuifeng。
+
+无论是否导入，都可以核对 SHA-256 确认文件未被改动：
 
     certutil -hashfile "下载工具.exe" SHA256
 

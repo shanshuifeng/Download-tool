@@ -151,9 +151,17 @@ python build_and_sign.py --version v1.3.0 # 指定版本号（缺省取最近的
 
 ## 关于「未知发布者」
 
-发布的 exe **没有代码签名**，Windows 会提示「未知发布者」，这是预期现象，不是文件损坏或被篡改。
+发布的 exe 使用**自签名证书**签名，签名者为 `shanshuifeng`。证书由本项目自行生成、并非商业 CA 签发，Windows 默认不信任它，因此仍会提示「未知发布者」——这是预期现象，不代表文件损坏或被篡改。
 
-想确认下载到的文件确实出自本仓库，核对 SHA-256 即可——GitHub 为每个资产计算了摘要，显示在 Release 页面：
+若希望系统直接认可该签名，把随 Release 提供的 `DownloadTool.cer` 导入「受信任的根证书颁发机构」（只影响本机，可随时删除）：
+
+```powershell
+Import-Certificate -FilePath DownloadTool.cer -CertStoreLocation Cert:\CurrentUser\Root
+```
+
+导入后，由同一张证书签名的版本会显示发布者为 `shanshuifeng`。
+
+**校验完整性**：无论是否导入证书，都可以核对 SHA-256——GitHub 为每个资产计算摘要，显示在 Release 页面：
 
 ```bash
 certutil -hashfile DownloadTool.exe SHA256
@@ -161,7 +169,7 @@ certutil -hashfile DownloadTool.exe SHA256
 
 与页面上的值一致，说明文件在传输过程中未被改动。若需要完全不依赖二进制，按上一节从源码构建。
 
-（不做签名的原因：自签名证书对公开分发没有帮助，SmartScreen 仍会拦截，除非用户手动把证书导入受信任根；商业证书的成本与流程见 `docs/README.md` 的「发布」一节。）
+（不购买商业证书的原因：按 CA/B 论坛要求，商业证书的私钥必须存放在硬件或云 HSM 中，无法用于 CI 自动签名；成本与各方案差异见 `docs/README.md` 的「发布」一节。）
 
 ## 项目结构
 

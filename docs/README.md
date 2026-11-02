@@ -93,13 +93,37 @@ git push origin v1.3.0
 
 ### 代码签名
 
-当前不签名。这不是省事，是权衡后的结论：
+产物用**自签名证书**签名，主体为 `CN=shanshuifeng, O=shanshuifeng, C=CN`，有效期 5 年。证书与私钥不入库：
 
-- **自签名证书对公开分发没有帮助。** SmartScreen 仍会拦截，除非用户手动把证书导入受信任根——没有普通用户会这么做。微软的分类里它属于「Dev/testing only, or enterprise with managed certificate trust」。
-- **商业证书无法直接用于 CI。** 按 CA/B 论坛要求，2023 年起代码签名私钥必须存放在硬件或云 HSM，不能再以 `.pfx` 形式放进仓库或 Secrets。要在 CI 落地，需配套云签名服务。
-- **EV 不再有特殊待遇。** 2024 年起与 OV 在 SmartScreen 上无差别，都需要积累声誉。
+| 文件 | 位置 | 用途 |
+|---|---|---|
+| `DownloadTool_SelfSigned.pfx` | `build/signing/`（不入库） | 签名用，含私钥，口令在环境变量 `DLTOOL_PFX_PASSWORD` |
+| `DownloadTool_SelfSigned.cer` | `build/signing/`（不入库） | 公钥证书，随 Release 与便携包分发，供用户导入信任 |
 
-若将来要真实签名，可选路径：
+生成方式（PowerShell，在仓库根执行）：
+
+```powershell
+$cert = New-SelfSignedCertificate -Type CodeSigningCert `
+  -Subject 'CN=shanshuifeng, O=shanshuifeng, C=CN' `
+  -CertStoreLocation Cert:\CurrentUser\My `
+  -KeyUsage DigitalSignature -KeyExportPolicy Exportable `
+  -KeyAlgorithm RSA -KeyLength 3072 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(5)
+```
+
+**CI 签名需要两个仓库 Secret。** 未配置时发布会自动降级为未签名，不会失败（fork 与本机测试因此不受影响）：
+
+| Secret | 内容 |
+|---|---|
+| `DLTOOL_PFX_BASE64` | `.pfx` 文件的 base64（`[Convert]::ToBase64String([IO.File]::ReadAllBytes('…\DownloadTool_SelfSigned.pfx'))`） |
+| `DLTOOL_PFX_PASSWORD` | 该 pfx 的口令 |
+
+为什么停在自签名、不买商业证书：
+
+- **商业证书无法直接用于 CI。** 按 CA/B 论坛要求，2023 年起代码签名私钥必须存放在硬件或云 HSM，不能再以 `.pfx` 形式放进仓库或 Secrets。要在 CI 落地需配套云签名服务。
+- **EV 不再有特殊待遇。** 2024 年起与 OV 在 SmartScreen 上无差别，都要积累声誉。
+- **自签名至少做到身份一致。** 签名者固定为 `shanshuifeng`，愿意导入证书的用户此后可以验证后续版本确实出自同一主体——这是自签名能做到的部分。
+
+若将来要换成受信任证书，可选路径：
 
 | 方案 | 成本 | 说明 |
 |---|---|---|
@@ -109,4 +133,4 @@ git push origin v1.3.0
 | Azure Artifact Signing | 约 $10/月 | 个人开发者仅限美国与加拿大 |
 | Microsoft Store (MSIX) | 免费 | 商店代签，无 SmartScreen 提示，但需按 MSIX 打包并过审 |
 
-在此之前，完整性由 SHA-256 保障：GitHub 为每个资产计算摘要，用户可用 `certutil -hashfile` 核对。
+签名之外，完整性另有 SHA-256 兜底：GitHub 为每个资产计算摘要，用户可用 `certutil -hashfile` 核对——即使不导入证书，也能确认文件未被改动。
