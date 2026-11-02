@@ -12,11 +12,14 @@ build/dist/
 build/便携版/
 build/_backup_*/
 
-# ===== 证书与私钥（一律不入库）=====
+# ===== 证书与私钥 =====
+# 私钥一律不入库；公钥证书本身不含任何秘密，反而是给用户验证签名用的，
+# 因此 assets/DownloadTool.cer 例外入库。
 build/signing/
 *.pfx
 *.pvk
 *.cer
+!assets/DownloadTool.cer
 
 # ===== 运行时中间文件 =====
 config.json

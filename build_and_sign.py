@@ -42,7 +42,8 @@ VENV = os.path.join(tempfile.gettempdir(), "pyi_build_env")
 WORK = os.path.join(tempfile.gettempdir(), "pyi_work")
 DIST = os.path.join(tempfile.gettempdir(), "pyi_dist")
 PFX = os.path.join(BUILD, "signing", "DownloadTool_SelfSigned.pfx")
-CER = os.path.join(BUILD, "signing", "DownloadTool_SelfSigned.cer")
+# 公钥证书入库（不含私钥），随产物分发，便于用户导入受信任根
+CER = os.path.join(ASSETS, "DownloadTool.cer")
 
 # 版本资源：模板入库，成品在打包时生成——版本号的唯一来源是 git tag
 VERSION_INFO_TEMPLATE = os.path.join(BUILD, "version_info.txt.in")
