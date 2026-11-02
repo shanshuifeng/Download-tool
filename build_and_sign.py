@@ -356,6 +356,8 @@ def main():
         sys.stdout.buffer, encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-sign", action="store_true")
+    ap.add_argument("--sign-if-available", action="store_true",
+                    help="有证书就签名，没有则跳过（CI 用：未配置 Secret 时照常出包）")
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--no-deploy", action="store_true",
                     help="不往桌面/便携目录复制（CI 用；便携包仍会生成）")
@@ -381,8 +383,12 @@ def main():
     else:
         exe = build(py, version_info)
 
+    # 证书齐备才谈得上签名；--sign-if-available 用于 CI：未配置 Secret 时跳过而非失败
+    have_cert = os.path.isfile(PFX) and bool(PFX_PASSWORD)
     if args.no_sign:
         print("[5/6] 跳过签名")
+    elif args.sign_if_available and not have_cert:
+        print("[5/6] 未配置签名证书，跳过签名（产物将显示「未知发布者」）")
     else:
         st = find_signtool()
         if not st:
@@ -402,7 +408,7 @@ def main():
         deploy(exe)
 
     print("\n完成。")
-    if args.no_sign:
+    if args.no_sign or not have_cert:
         print("提示：本次未签名，Windows 会提示「未知发布者」。")
     else:
         print("提示：已用自签名证书签名，但证书未受信任根背书，")
