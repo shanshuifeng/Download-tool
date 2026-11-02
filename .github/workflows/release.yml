@@ -34,15 +34,11 @@ jobs:
         env:
           DLTOOL_USE_SYSTEM_PYTHON: '1'
 
+      # 用 Python 而不是 PowerShell 收集产物：run 块会被写成临时 .ps1，而
+      # Windows PowerShell 5.1 在无 BOM 时按 ANSI 解析，中文文件名在解析阶段
+      # 就被破坏，上传后变成 default.exe / _.zip。Python 全程 Unicode，无此问题。
       - name: 收集产物
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item "$env:TEMP\pyi_dist\DownloadTool.exe" "dist\下载工具.exe" -Force
-          if (Test-Path "build\便携版\下载工具_便携版.zip") {
-            Copy-Item "build\便携版\下载工具_便携版.zip" "dist\下载工具_便携版.zip" -Force
-          }
-          Get-ChildItem dist | Format-Table Name, Length
+        run: python tools/collect_artifacts.py
 
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
