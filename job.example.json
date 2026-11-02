@@ -2,7 +2,7 @@
   "urls": [
     "https://github.com/microsoft/WSL/releases/download/3.0.3/Microsoft.WSL.Containers.3.0.3.nupkg"
   ],
-  "out": "C:/Users/Administrator/AppData/Local/Temp/dlz",
+  "out": "D:/下载",
   "threads": 8,
   "sha256": "d31f78cc4816ccccc0dc196ecf4d2b27911b8ed677b4b9cc697274e941b6511b",
   "proxy": null,

@@ -47,7 +47,7 @@ htmlcov/
 Thumbs.db
 desktop.ini
 
-# ===== 本机 agent 状态 =====
+# ===== 本地工作目录 =====
 .workbuddy/
 
 # 版本资源成品：由 build_and_sign.py 按 git tag 从 .in 模板生成，不入库
