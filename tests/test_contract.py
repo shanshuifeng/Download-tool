@@ -724,7 +724,7 @@ class ContractToolTest(unittest.TestCase):
         """BUG-12 源码里不许留死导入；_opener 是给测试的再导出，进白名单。"""
         # 再导出的公开符号按 CORE-001 保留在引擎模块上，不算死导入
         allow = {"_opener", "annotations", "GITHUB_MIRRORS",
-                 "build_mirror_urls", "is_github_release"}
+                 "build_mirror_urls", "is_github_release", "EXIT_NO_MIRROR"}
         dead = {}
         for path in self._sources():
             tree = ast.parse(path.read_text(encoding="utf-8"))

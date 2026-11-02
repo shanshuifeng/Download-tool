@@ -277,7 +277,7 @@ def prune_backups(keep=3):
     """只留最近 keep 个 _backup_* 目录。
 
     每次部署都会把旧 exe 备份到当天的目录里，一个目录约 23MB。
-    不设上限的话，两个月就能堆出几个 G —— 这正是这轮清理掉的东西。
+    不设上限的话，两个月就能堆出几个 G，所以只保留最近几个。
     """
     dirs = sorted(
         (d for d in os.listdir(BUILD) if d.startswith("_backup_")),
@@ -330,7 +330,7 @@ def deploy(exe):
     """把 exe 放到桌面 / 便携目录——只在本地跑，CI 不需要（用 --no-deploy 跳过）。"""
     print("[6/6] 部署")
     os.makedirs(BUILD, exist_ok=True)
-    os.makedirs(PORTABLE, exist_ok=True)   # 便携目录要先建，否则这轮会被跳过
+    os.makedirs(PORTABLE, exist_ok=True)   # 便携目录要先建，否则下面的复制会被跳过
     bak = os.path.join(BUILD, "_backup_" + __import__("datetime").date.today().strftime("%Y%m%d"))
     os.makedirs(bak, exist_ok=True)
     kill_running_tool()

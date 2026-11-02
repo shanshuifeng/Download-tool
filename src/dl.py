@@ -30,11 +30,11 @@ import os
 import sys
 import time
 
-from downloader import EXIT_FAIL, EXIT_NO_MIRROR, DownloadError, DownloadTask, human
+# EXIT_NO_MIRROR 是再导出：CLI-002 的 exit_codes 检查直接 getattr 取用它
+from downloader import EXIT_FAIL, EXIT_NO_MIRROR, DownloadError, DownloadTask, human  # noqa: F401
 
 EXIT_OK = 0  # @contract CLI-002
 EXIT_ARGS = 2
-EXIT_NOMIRROR = EXIT_NO_MIRROR
 EXIT_CANCEL = 130
 
 # progress 节流阈值（CLI-012）。契约由校验器锁住，改这里就要改契约。

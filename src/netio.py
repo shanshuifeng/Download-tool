@@ -69,9 +69,6 @@ def _opener(proxy: str | None = None):  # @contract CORE-013
     return op
 
 
-OPENER = _opener()  # 兼容旧引用；默认跟随环境变量
-
-
 # ---------------- SOCKS5 ----------------
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:

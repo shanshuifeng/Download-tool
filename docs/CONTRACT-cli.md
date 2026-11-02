@@ -86,7 +86,7 @@
   "checks": [
     {"type": "exit_codes", "module": "dl",
      "codes": {"0": "EXIT_OK", "1": "EXIT_FAIL", "2": "EXIT_ARGS",
-               "3": "EXIT_NOMIRROR", "130": "EXIT_CANCEL"}}
+               "3": "EXIT_NO_MIRROR", "130": "EXIT_CANCEL"}}
   ]
 }
 ```
@@ -124,7 +124,7 @@
 | `done` | 成功后一次 | `verified` 无期望哈希时为 `null`；`avg_speed` 为 B/s |
 | `error` | 失败后一次 | `code` 与退出码一致 |
 
-`start` 事件曾在 schema 中声明但实现从未发出，已移除（见变更记录）。若将来需要，应先改本节再改代码。
+`start` 事件曾在 schema 中声明但实现从未发出，已移除。若将来需要，应先改本节再改代码。
 
 **兼容规则**：字段只增不改。消费方必须忽略未知字段。
 
