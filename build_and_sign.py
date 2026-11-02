@@ -156,16 +156,30 @@ def find_python313():
 
 
 def find_signtool():
-    base = r"C:\Program Files (x86)\Windows Kits\10\bin"
-    if not os.path.isdir(base):
+    """定位 signtool.exe：先查 Windows SDK 的常见安装位置，再退回 PATH。
+
+    CI 镜像的 SDK 版本与路径不一定与本机一致（x64 / x86、Program Files 两侧），
+    只认一个固定路径会在 runner 上找不到，因此两处都查。
+    """
+    candidates = []
+    for root in (r"C:\Program Files (x86)\Windows Kits\10\bin",
+                 r"C:\Program Files\Windows Kits\10\bin"):
+        if not os.path.isdir(root):
+            continue
+        for ver in os.listdir(root):
+            candidates.append(os.path.join(root, ver, "x64", "signtool.exe"))
+    # PATH 里的（例如通过 WinGet 安装的 SDK 工具）
+    which = shutil.which("signtool")
+    if which:
+        candidates.append(which)
+    found = [p for p in candidates if os.path.isfile(p)]
+    if not found:
         return None
-    best = None
-    for ver in os.listdir(base):
-        p = os.path.join(base, ver, "x64", "signtool.exe")
-        if os.path.isfile(p):
-            if best is None or ver > best[0]:
-                best = (ver, p)
-    return best[1] if best else None
+    # 版本号形如 10.0.26100.0，按数值比较取最高
+    def key(path):
+        ver = os.path.basename(os.path.dirname(os.path.dirname(path)))
+        return tuple(int(x) for x in ver.split(".") if x.isdigit()) or (0,)
+    return max(found, key=key)
 
 
 def ensure_venv():
@@ -386,6 +400,7 @@ def main():
 
     # 证书齐备才谈得上签名；--sign-if-available 用于 CI：未配置 Secret 时跳过而非失败
     have_cert = os.path.isfile(PFX) and bool(PFX_PASSWORD)
+    signed = False
     if args.no_sign:
         print("[5/6] 跳过签名")
     elif args.sign_if_available and not have_cert:
@@ -393,12 +408,18 @@ def main():
     else:
         st = find_signtool()
         if not st:
-            raise SystemExit("未找到 signtool.exe")
-        print("  signtool:", st)
-        try:
-            sign(exe, st)
-        except RuntimeError as e:
-            raise SystemExit(f"签名失败：{e}")
+            if args.sign_if_available:
+                print("[5/6] 未找到 signtool，跳过签名（产物将显示「未知发布者」）")
+            else:
+                raise SystemExit("未找到 signtool.exe；或改用 --sign-if-available 允许跳过")
+        if st:
+            print("  signtool:", st)
+            try:
+                sign(exe, st)
+                signed = True
+            except RuntimeError as e:
+                raise SystemExit(f"签名失败：{e}")
+            have_cert = True
 
     # 便携包是发布必需的产物，与「要不要放到桌面」无关，所以先无条件打出来
     pack_portable(exe)
@@ -409,11 +430,11 @@ def main():
         deploy(exe)
 
     print("\n完成。")
-    if args.no_sign or not have_cert:
-        print("提示：本次未签名，Windows 会提示「未知发布者」。")
-    else:
+    if signed:
         print("提示：已用自签名证书签名，但证书未受信任根背书，")
         print("      其他电脑上仍显示「未知发布者」。导入以下证书后才会显示发布者：", CER)
+    else:
+        print("提示：本次未签名，Windows 会提示「未知发布者」。")
 
 
 if __name__ == "__main__":
