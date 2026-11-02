@@ -241,8 +241,17 @@ def pack_portable(exe):
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
         for n in members:
             z.write(os.path.join(PORTABLE, n), "下载工具/" + n)
-    desktop = os.path.join(os.path.expanduser("~"), "Desktop", "下载工具_便携版.zip")
-    shutil.copy2(zpath, desktop)
+    # 便携包顺手放一份到桌面，方便直接取用。这一步是**尽力而为**：
+    # CI（GitHub Actions 的 runner）没有 Desktop 目录，早期版本这里直接
+    # copy2 会抛 FileNotFoundError，让整个发布流程挂在最后一步。
+    desktop_dir = os.path.join(os.path.expanduser("~"), "Desktop")
+    if os.path.isdir(desktop_dir):
+        try:
+            shutil.copy2(zpath, os.path.join(desktop_dir, "下载工具_便携版.zip"))
+        except OSError as e:
+            print("  桌面副本跳过：", e)
+    else:
+        print("  桌面副本跳过：无 Desktop 目录（CI 环境属正常）")
     print("  便携包:", zpath, f"({os.path.getsize(zpath)/1048576:.1f} MB)")
 
 
