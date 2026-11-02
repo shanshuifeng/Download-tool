@@ -16,7 +16,7 @@ Windows 平台的多线程分段下载器，仅依赖 Python 标准库。打包�
 
 | 渠道 | 内容 |
 |---|---|
-| [Releases](https://github.com/shanshuifeng/Download-tool/releases) | 每个版本提供 `下载工具.exe` 与 `下载工具_便携版.zip`，由 GitHub Actions 构建 |
+| [Releases](https://github.com/shanshuifeng/Download-tool/releases) | 每个版本提供 `DownloadTool.exe` 与 `DownloadTool-portable.zip`，由 GitHub Actions 构建。资产名用 ASCII：CI 在 Windows 上，中文文件名会在上传环节被代码页丢掉；程序本身与便携包内部仍是中文名「下载工具」 |
 | 源码自行打包 | 参照下方「打包为单个 exe」，可得到带签名的产物 |
 
 Releases 中的产物由 CI 构建，仓库不保存签名证书，因此**未签名**，Windows 会显示「未知发布者」，属预期现象。对文件完整性有要求的使用者，请以源码自行构建并校验哈希。

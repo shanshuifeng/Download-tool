@@ -1,12 +1,15 @@
 """把构建产物按发布用的名字收拢到 dist/。
 
-为什么要有这个脚本：release 工作流原先用 PowerShell 的 Copy-Item 复制带中文名
-的文件。GitHub Actions 会把 run 块写成临时 .ps1，而 Windows PowerShell 5.1 在
-没有 BOM 时按 ANSI 解析脚本，中文文件名在**解析阶段**就被破坏——结果上传的资产
-变成 `default.exe` 与 `_.zip`（软链接式地保留了后缀，名字全丢）。
+**发布用的资产名一律用 ASCII。** 这不是审美选择，是 Windows runner 的硬约束：
 
-改用 Python 做这件事：源码按 UTF-8 解析，文件 API 全程 Unicode，不经过任何
-shell 的编码转换。这也让「收集产物」这一步能在本机复现验证。
+release 工作流早期用 PowerShell 的 Copy-Item 复制带中文名的文件，上传后资产变成
+`default.exe` 与 `_.zip`——中文被整体丢弃（`下载工具_便携版.zip` → `_.zip`，正是
+按 cp1252 编码并忽略不可映射字符的结果）。改成 Python 收集后文件名在磁盘上是
+对的，但上传环节仍会丢中文，两个层面都在 Windows 的代码页上栽跟头。
+
+与其和编码反复拉扯，不如让进出的文件名都落在 ASCII 里：程序本身、便携包内部的
+目录名与 exe 名、Release 页面的说明文字，仍然是中文——只有**下载链接上的文件名**
+是 ASCII。这条边界划清楚，发布链路就再也不会因为代码页而坏。
 
 用法（在仓库根目录执行）::
 
@@ -24,19 +27,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DIST = os.path.join(ROOT, "dist")
 
-# 构建产物：PyInstaller 的输出（ASCII 名）→ 发布用的中文名
+# 构建产物（PyInstaller 输出，已是 ASCII 名）→ 发布资产名（同样 ASCII）
 EXE_SRC = os.path.join(tempfile.gettempdir(), "pyi_dist", "DownloadTool.exe")
-EXE_DST = os.path.join(DIST, "下载工具.exe")
+EXE_DST = os.path.join(DIST, "DownloadTool.exe")
 
+# 便携包由 build_and_sign.py 生成，源路径含中文（Python 读写没问题，只是不进资产名）
 ZIP_SRC = os.path.join(ROOT, "build", "便携版", "下载工具_便携版.zip")
-ZIP_DST = os.path.join(DIST, "下载工具_便携版.zip")
+ZIP_DST = os.path.join(DIST, "DownloadTool-portable.zip")
 
 
 def main() -> int:
-    # 产物名是中文，而 CI 的 Windows 控制台默认不是 UTF-8（cp1252/cp936 视镜像而定）。
-    # 不显式指定的话，print 会在最后一步抛 UnicodeEncodeError，让整个发布失败——
-    # 文件其实已经复制好了，只是「报个结果」这一步炸了。build_and_sign.py 里
-    # 用的是同一套办法。
+    # 即便资产名是 ASCII，日志里仍会打印中文（如「便携包不存在」）。CI 的
+    # Windows 控制台默认不是 UTF-8（cp1252/cp936 视镜像而定），不显式指定的话
+    # print 会抛 UnicodeEncodeError 让整步以 101 退出——文件已复制好，只是
+    # 「报个结果」这一步炸了。build_and_sign.py 里用的是同一套办法。
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -57,7 +61,7 @@ def main() -> int:
     print("dist/ 内容：")
     for name in sorted(os.listdir(DIST)):
         p = os.path.join(DIST, name)
-        print(f"  {name:24} {os.path.getsize(p) / 1048576:.2f} MB")
+        print(f"  {name:26} {os.path.getsize(p) / 1048576:.2f} MB")
     return 0
 
 

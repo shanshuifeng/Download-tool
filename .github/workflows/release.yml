@@ -35,8 +35,8 @@ jobs:
           DLTOOL_USE_SYSTEM_PYTHON: '1'
 
       # 用 Python 而不是 PowerShell 收集产物：run 块会被写成临时 .ps1，而
-      # Windows PowerShell 5.1 在无 BOM 时按 ANSI 解析，中文文件名在解析阶段
-      # 就被破坏，上传后变成 default.exe / _.zip。Python 全程 Unicode，无此问题。
+      # 文件名全程 ASCII：Windows runner 的代码页会在上传环节丢掉中文，
+      # 带中文的资产名会变成 default.exe / _.zip。理由见 tools/collect_artifacts.py。
       - name: 收集产物
         run: python tools/collect_artifacts.py
         env:
@@ -49,13 +49,17 @@ jobs:
           name: ${{ inputs.tag || github.ref_name }}
           generate_release_notes: true
           files: |
-            dist/下载工具.exe
-            dist/下载工具_便携版.zip
+            dist/DownloadTool.exe
+            dist/DownloadTool-portable.zip
           body: |
             Windows 多线程分段下载器，单文件交付，仅依赖 Python 标准库。
 
-            - `下载工具.exe`：双击打开界面；带参数即命令行模式
-            - `下载工具_便携版.zip`：便携包，解压后直接使用
+            - `DownloadTool.exe`：双击打开界面（程序名为「下载工具」）；带参数即命令行模式
+            - `DownloadTool-portable.zip`：便携包，解压后直接使用，内含 `下载工具/` 目录
+
+            资产名用 ASCII 是刻意的：CI 跑在 Windows 上，带中文的文件名会在上传环节
+            被代码页丢掉（曾出现 `下载工具_便携版.zip` 变成 `_.zip`）。程序本身与
+            便携包内部仍是中文名。
 
             本次产物由 GitHub Actions 构建，**未签名**，Windows 会显示「未知发布者」，
             属预期现象。需要校验哈希的用户请使用源码构建。
