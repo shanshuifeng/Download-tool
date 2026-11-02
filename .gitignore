@@ -1,28 +1,51 @@
-# 构建产物（build/ 下的版本信息文件是要入库的，只忽略产物部分）
+# ===== 入库（推 GitHub 的最小集合）=====
+# 源码 src/、测试 tests/、文档 docs/、图标 assets/、版本资源 build/version_info.txt、
+# README.md / 使用说明.txt / job.example.json
+# 下面所有规则只挡「产物、密钥、本机状态」，不要把源码或测试一起忽略掉。
+
+# ===== 构建产物 =====
 *.exe
 *.zip
 *.spec
+dist/
+build/dist/
 build/便携版/
 build/_backup_*/
+
+# ===== 证书与私钥（一律不入库）=====
 build/signing/
-build/dist/
-
-# 证书与私钥不入库
 *.pfx
+*.pvk
+*.cer
 
-# 本地运行态
-__pycache__/
-*.pyc
+# ===== 运行时中间文件 =====
 config.json
 *.corrupt
 *.parts/
 *.part
 *.part.json
+*.part.json.tmp
+*.tmp
+*.log
 
-# 工作区记忆（本机 agent 状态，不入库）
-.workbuddy/
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# 临时产物
+# ===== 编辑器 / 系统 =====
+.idea/
+.vscode/
 ~$*
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# ===== 本机 agent 状态 =====
+.workbuddy/

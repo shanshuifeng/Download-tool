@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布版本号（例如 v1.2.0）'
+        required: true
+        default: 'v1.2.0'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 安装 PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      # 仓库不保存签名证书，CI 产物为未签名版本（Windows 显示「未知发布者」）。
+      # 需要签名版时，在本机执行 build_and_sign.py 后手动上传 Release。
+      - name: 打包（不签名）
+        run: python build_and_sign.py --no-sign
+        env:
+          DLTOOL_USE_SYSTEM_PYTHON: '1'
+
+      - name: 收集产物
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "$env:TEMP\pyi_dist\DownloadTool.exe" "dist\下载工具.exe" -Force
+          if (Test-Path "build\便携版\下载工具_便携版.zip") {
+            Copy-Item "build\便携版\下载工具_便携版.zip" "dist\下载工具_便携版.zip" -Force
+          }
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/下载工具.exe
+            dist/下载工具_便携版.zip
+          body: |
+            Windows 多线程分段下载器，单文件交付，仅依赖 Python 标准库。
+
+            - `下载工具.exe`：双击打开界面；带参数即命令行模式
+            - `下载工具_便携版.zip`：便携包，解压后直接使用
+
+            本次产物由 GitHub Actions 构建，**未签名**，Windows 会显示「未知发布者」，
+            属预期现象。需要校验哈希的用户请使用源码构建。
+
+            项目地址：https://github.com/shanshuifeng/Download-tool
+            许可：Apache-2.0

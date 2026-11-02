@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 安装 tkinter 与依赖
+        run: python -m pip install --upgrade pip
+
+      - name: 契约校验
+        run: python docs/verify_contract.py
+
+      - name: 单元测试
+        run: python -m unittest discover -s tests -v
+
+      - name: 行宽与死导入静态检查
+        run: python -m unittest tests.test_contract -v

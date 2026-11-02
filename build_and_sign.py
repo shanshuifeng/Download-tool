@@ -2,6 +2,10 @@
 """
 下载工具 —— 重新打包 + 写版本信息 + 签名，一条命令完成。
 
+产物只有一个 exe（gui.pyw 是唯一入口）：有参数走命令行，没参数开界面。
+控制台子系统 + GUI 分发，脚本调用的退出码 / 管道 / 重定向都正常；
+双击时的控制台窗口由 _hide_own_console 自行隐藏。
+
 为什么不用 Windows API 直接改 exe 的资源段：
     PyInstaller --onefile 的 PE 镜像只占前 ~310KB，其后 10MB+ 是附加的 CArchive。
     UpdateResource / BeginUpdateResource 重写 PE 时会把这部分截断，
@@ -17,6 +21,9 @@
     - Python 3.13（与源 exe 一致，避免字节码版本不符）
     - PyInstaller（脚本会自动在临时 venv 里装）
     - Windows SDK 的 signtool.exe
+
+作者：shanshuifeng
+项目：https://github.com/shanshuifeng/Download-tool
 """
 import argparse
 import os
@@ -25,8 +32,6 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-
-sys.stdout = __import__("io").TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "src")
@@ -37,8 +42,8 @@ WORK = os.path.join(tempfile.gettempdir(), "pyi_work")
 DIST = os.path.join(tempfile.gettempdir(), "pyi_dist")
 PFX = os.path.join(BUILD, "signing", "DownloadTool_SelfSigned.pfx")
 CER = os.path.join(BUILD, "signing", "DownloadTool_SelfSigned.cer")
-# 优先读环境变量，避免把口令写死在会被分享的脚本里
-PFX_PASSWORD = os.environ.get("DLTOOL_PFX_PASSWORD", "dsh-local-sign-2026")
+# 口令只从环境变量取，仓库里不留任何口令
+PFX_PASSWORD = os.environ.get("DLTOOL_PFX_PASSWORD", "")
 MIRROR = "https://mirrors.aliyun.com/pypi/simple/"
 
 # 部署目标（相对当前用户）
@@ -48,15 +53,16 @@ DEPLOY = [
     os.path.join(PORTABLE, "下载工具.exe"),
 ]
 
-# 命令行/自动化接口：桌面也放一份，Agent 可直接调用
-DEPLOY_CLI = [
-    os.path.join(os.path.expanduser("~"), "Desktop", "dl.exe"),
-    os.path.join(PORTABLE, "dl.exe"),
-]
-
 
 def run(cmd, **kw):
-    print("  $", " ".join(str(c) for c in cmd))
+    redact = kw.pop("redact", None)
+    shown = [str(c) for c in cmd]
+    if redact:
+        # 口令等敏感参数不落日志：CI 日志会长期保留
+        for i, c in enumerate(shown):
+            if c == redact and i + 1 < len(shown):
+                shown[i + 1] = "***"
+    print("  $", " ".join(shown))
     r = subprocess.run(cmd, capture_output=True, text=True,
                        encoding="utf-8", errors="replace", **kw)
     if r.stdout.strip():
@@ -91,6 +97,10 @@ def find_signtool():
 
 
 def ensure_venv():
+    if os.environ.get("DLTOOL_USE_SYSTEM_PYTHON") == "1":
+        # CI 等已自带 PyInstaller 的环境：直接用当前解释器，不再建虚拟环境
+        print("[2/5] 使用当前解释器的 PyInstaller:", sys.executable)
+        return sys.executable
     py = os.path.join(VENV, "Scripts", "python.exe")
     if os.path.isfile(py):
         print("[2/5] 复用已有构建环境")
@@ -131,31 +141,18 @@ def build(py):
     for d in (WORK, DIST):
         shutil.rmtree(d, ignore_errors=True)
 
-    # GUI
-    run([py, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed",
+    # 只出一个 exe：有参数走命令行，没参数开界面（分发逻辑在 gui.pyw 的 main）
+    run([py, "-m", "PyInstaller", "--noconfirm", "--onefile", "--console",
          "--name", "DownloadTool",
          "--paths", SRC,
          "--icon", os.path.join(ASSETS, "icon.ico"),
          "--version-file", os.path.join(BUILD, "version_info.txt"),
          "--distpath", DIST, "--workpath", WORK, "--specpath", WORK,
          os.path.join(SRC, "gui.pyw")])
-    gui = os.path.join(DIST, "DownloadTool.exe")
-
-    # CLI（控制台，供脚本 / AI 调用）
-    run([py, "-m", "PyInstaller", "--noconfirm", "--onefile", "--console",
-         "--name", "dl",
-         "--paths", SRC,
-         "--icon", os.path.join(ASSETS, "icon.ico"),
-         "--version-file", os.path.join(BUILD, "version_info_cli.txt"),
-         "--distpath", DIST, "--workpath", os.path.join(WORK, "cli"),
-         "--specpath", os.path.join(WORK, "cli"),
-         os.path.join(SRC, "dl.py")])
-    cli = os.path.join(DIST, "dl.exe")
-
-    for f in (gui, cli):
-        if not os.path.isfile(f):
-            raise RuntimeError("打包产物不存在: " + f)
-    return gui, cli
+    exe = os.path.join(DIST, "DownloadTool.exe")
+    if not os.path.isfile(exe):
+        raise RuntimeError("打包产物不存在: " + exe)
+    return exe
 
 
 def _file_in_use(path):
@@ -168,20 +165,30 @@ def _file_in_use(path):
 
 
 def kill_running_tool():
-    """关掉正在运行的下载工具进程，否则产物被占用无法覆盖/签名。"""
-    r = subprocess.run(["taskkill", "/F", "/IM", "DownloadTool.exe"],
-                       capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
-    if r.returncode == 0:
-        print("  已结束正在运行的 DownloadTool.exe")
-        import time
-        time.sleep(1.5)
+    """关掉正在运行的下载工具进程，否则产物被占用无法覆盖/签名。
+
+    部署后文件名是「下载工具.exe」，打包中间产物叫 DownloadTool.exe，
+    两个名字都要试——只按一个名字杀是杀不掉的。
+    """
+    import time
+
+    for name in ("下载工具.exe", "DownloadTool.exe"):
+        r = subprocess.run(["taskkill", "/F", "/IM", name],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        if r.returncode == 0:
+            print("  已结束正在运行的", name)
+            time.sleep(1.5)
 
 
 def sign(exe, signtool):
     print("[4/5] 签名")
     if not os.path.isfile(PFX):
         raise RuntimeError(f"证书不存在：{PFX}")
+    if not PFX_PASSWORD:
+        raise RuntimeError(
+            "缺少签名口令：请先设置环境变量 DLTOOL_PFX_PASSWORD"
+            "（或用 --no-sign 跳过签名）")
     if _file_in_use(exe):
         kill_running_tool()
         if _file_in_use(exe):
@@ -191,7 +198,8 @@ def sign(exe, signtool):
     run([signtool, "sign", "/fd", "SHA256",
          "/f", PFX, "/p", PFX_PASSWORD,
          "/tr", "http://timestamp.digicert.com", "/td", "SHA256",
-         "/d", "DownloadTool - Multi-thread Segment Downloader", exe])
+         "/d", "DownloadTool - Multi-thread Segment Downloader", exe],
+        redact="/p")
 
 
 def prune_backups(keep=3):
@@ -213,7 +221,7 @@ def prune_backups(keep=3):
             print("  旧备份清理失败（可忽略）:", d, e)
 
 
-def pack_portable(exe, exe_cli):
+def pack_portable(exe):
     """把便携版内容归拢到 build/便携版/ 并打成 zip。
 
     以前这一步靠手工，导致 zip 经常内含旧 exe —— 没人会发现。
@@ -222,14 +230,12 @@ def pack_portable(exe, exe_cli):
     os.makedirs(PORTABLE, exist_ok=True)
     if exe:
         shutil.copy2(exe, os.path.join(PORTABLE, "下载工具.exe"))
-    if exe_cli:
-        shutil.copy2(exe_cli, os.path.join(PORTABLE, "dl.exe"))
     for n in names:
         src = os.path.join(HERE, n)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(PORTABLE, n))
 
-    members = [n for n in ["下载工具.exe", "dl.exe"] + names
+    members = [n for n in ["下载工具.exe"] + names
                if os.path.isfile(os.path.join(PORTABLE, n))]
     zpath = os.path.join(PORTABLE, "下载工具_便携版.zip")
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
@@ -240,31 +246,31 @@ def pack_portable(exe, exe_cli):
     print("  便携包:", zpath, f"({os.path.getsize(zpath)/1048576:.1f} MB)")
 
 
-def deploy(exe, exe_cli=None):
+def deploy(exe):
     print("[5/5] 部署")
     os.makedirs(BUILD, exist_ok=True)
+    os.makedirs(PORTABLE, exist_ok=True)   # 便携目录要先建，否则这轮会被跳过
     bak = os.path.join(BUILD, "_backup_" + __import__("datetime").date.today().strftime("%Y%m%d"))
     os.makedirs(bak, exist_ok=True)
     kill_running_tool()
-    pairs = [(exe, DEPLOY)]
-    if exe_cli:
-        pairs.append((exe_cli, DEPLOY_CLI))
-    for src, targets in pairs:
-        for t in targets:
-            parent = os.path.dirname(t)
-            if not os.path.isdir(parent):
-                print("  跳过（目录不存在）:", t)
-                continue
-            if os.path.isfile(t):
-                shutil.copy2(t, os.path.join(bak, os.path.basename(parent) + "-bak.exe"))
-            shutil.copy2(src, t)
-            print("  已部署:", t)
+    for t in DEPLOY:
+        parent = os.path.dirname(t)
+        if not os.path.isdir(parent):
+            print("  跳过（目录不存在）:", t)
+            continue
+        if os.path.isfile(t):
+            shutil.copy2(t, os.path.join(bak, os.path.basename(parent) + "-bak.exe"))
+        shutil.copy2(exe, t)
+        print("  已部署:", t)
     print("  备份目录:", bak)
     prune_backups()
-    pack_portable(exe, exe_cli)
+    pack_portable(exe)
 
 
 def main():
+    # 输出统一为 UTF-8；放在 main 内而非模块级，便于被测试导入
+    sys.stdout = __import__("io").TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-sign", action="store_true")
     ap.add_argument("--no-build", action="store_true")
@@ -280,12 +286,11 @@ def main():
 
     if args.no_build:
         exe = os.path.join(DIST, "DownloadTool.exe")
-        exe_cli = os.path.join(DIST, "dl.exe")
         if not os.path.isfile(exe):
             raise SystemExit("dist 中没有现成 exe，请去掉 --no-build")
-        print("[3/5] 跳过打包，使用:", exe, "/", exe_cli)
+        print("[3/5] 跳过打包，使用:", exe)
     else:
-        exe, exe_cli = build(py)
+        exe = build(py)
 
     if args.no_sign:
         print("[4/5] 跳过签名")
@@ -294,13 +299,15 @@ def main():
         if not st:
             raise SystemExit("未找到 signtool.exe")
         print("  signtool:", st)
-        sign(exe, st)
-        sign(exe_cli, st)
+        try:
+            sign(exe, st)
+        except RuntimeError as e:
+            raise SystemExit(f"签名失败：{e}")
 
     if args.no_deploy:
-        print("[5/5] 跳过部署，产物在:", exe, "/", exe_cli)
+        print("[5/5] 跳过部署，产物在:", exe)
     else:
-        deploy(exe, exe_cli)
+        deploy(exe)
 
     print("\n完成。")
     print("提示：自签名证书未受信任根背书，别人电脑上仍显示「未知发布者」。")
