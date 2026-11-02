@@ -709,6 +709,53 @@ class BugTest(unittest.TestCase):
         self.assertNotIn("MySecretPfxPwd123", out, "口令出现在日志中")
         self.assertIn("***", out, "口令未被遮蔽")
 
+    # ---------------- 版本号：唯一来源是 git tag ----------------
+
+    def test_version_info_template_has_no_literal_version(self):
+        """版本号只能来自 git tag：模板里出现字面版本即视为回退。
+
+        同一个事实（当前是哪个版本）若同时写在 tag、版本资源、README、Release
+        名里，就一定会有一处忘记改，而且没有机制能发现。模板因此只放占位符。
+        """
+        tpl = (ROOT / "build" / "version_info.txt.in").read_text(encoding="utf-8")
+        self.assertIn("{VERSION_TUPLE}", tpl, "模板缺少 {VERSION_TUPLE} 占位符")
+        self.assertIn("{VERSION}", tpl, "模板缺少 {VERSION} 占位符")
+        literal_checks = [
+            (r"filevers\s*=\s*\(\s*\d", "filevers 被写成了字面量"),
+            (r"prodvers\s*=\s*\(\s*\d", "prodvers 被写成了字面量"),
+            (r"'FileVersion'\s*,\s*'\d", "FileVersion 被写成了字面量"),
+            (r"'ProductVersion'\s*,\s*'\d", "ProductVersion 被写成了字面量"),
+        ]
+        for pattern, msg in literal_checks:
+            self.assertIsNone(re.search(pattern, tpl), msg + "；应改回占位符")
+
+    def test_version_resource_renders_from_tag(self):
+        """按 tag 渲染：v1.4.2 → filevers=(1, 4, 2, 0) 与 '1.4.2.0'。"""
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        import build_and_sign  # noqa: PLC0415
+
+        self.assertEqual(build_and_sign._norm_version("v1.4.2"), "1.4.2")
+        self.assertEqual(build_and_sign._norm_version("1.4.2"), "1.4.2")
+        with self.assertRaises(SystemExit):
+            build_and_sign._norm_version("abc")
+
+        tmp = tempfile.mkdtemp(prefix="vinfo_")
+        old = build_and_sign.VERSION_INFO_GENERATED
+        build_and_sign.VERSION_INFO_GENERATED = os.path.join(tmp, "vi.txt")
+        try:
+            path = build_and_sign.render_version_info("1.4.2")
+            text = Path(path).read_text(encoding="utf-8")
+        finally:
+            build_and_sign.VERSION_INFO_GENERATED = old
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertIn("filevers=(1, 4, 2, 0)", text)
+        self.assertIn("prodvers=(1, 4, 2, 0)", text)
+        self.assertIn("'FileVersion', '1.4.2.0'", text)
+        self.assertIn("'ProductVersion', '1.4.2.0'", text)
+        self.assertNotIn("{VERSION", text, "占位符没有被替换")
+
     # ---------------- BUG-26 · 共享状态须在锁内写入 ----------------
 
     def test_bug26_shared_state_under_lock(self):

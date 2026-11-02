@@ -93,7 +93,8 @@ python build_and_sign.py --no-deploy  # 仅出包，不修改桌面与便携目�
     ├── tests/                # 98 个用例（本地假服务器，不访问外网）
     ├── docs/                 # 契约文档、需求拆分、缺陷报告、校验器
     └── build/                # 构建配置与产物
-        ├── version_info.txt  #   版本资源（入库）
+        ├── version_info.txt.in  #  版本资源模板（入库，不含版本号）
+        ├── version_info.generated.txt  # 打包时由 tag 生成（不入库）
         ├── signing/          #   自签名证书（不入库）
         ├── 便携版/           #   一份 exe 与便携 zip（不入库）
         └── _backup_*/        #   部署前的历史 exe（不入库）
@@ -344,11 +345,21 @@ CI 亦会在每次推送与合并请求时自动执行契约校验与单元测�
 
 ### 版本信息
 
-在 `build/version_info.txt` 中维护，打包时写入：
+**版本号只有一个来源：git tag。** 打包时 `build_and_sign.py` 从 tag 取值，渲染
+`build/version_info.txt.in` 模板，生成 `build/version_info.generated.txt` 交给
+PyInstaller。发版就是打标签，不需要四处同步数字。
 
-| 字段 | 当前值 |
+```bash
+python build_and_sign.py --version v1.3.0   # 显式指定
+DLTOOL_VERSION=v1.3.0 python build_and_sign.py   # 环境变量
+python build_and_sign.py                    # 缺省用最近的 git tag
+```
+
+版本资源里除版本号外的字段仍由模板维护：
+
+| 字段 | 值 |
 |---|---|
-| FileVersion / ProductVersion | 1.2.0.0 |
+| FileVersion / ProductVersion | 由 git tag 决定（如 v1.2.0 → 1.2.0.0） |
 | CompanyName | shanshuifeng |
 | FileDescription | 下载工具 - 多线程分段下载器（界面 + 命令行） |
 | ProductName | 下载工具 |

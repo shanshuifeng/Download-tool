@@ -29,12 +29,16 @@ jobs:
 
       # 仓库不保存签名证书，CI 产物为未签名版本（Windows 显示「未知发布者」）。
       # 需要签名版时，在本机执行 build_and_sign.py 后手动上传 Release。
+      #
+      # 版本号从 tag 传入：checkout 默认是浅克隆，脚本里的 git describe 未必能
+      # 拿到 tag，所以显式给。--no-deploy 跳过桌面复制（runner 也没有桌面），
+      # 便携包仍会生成。
       - name: 打包（不签名）
-        run: python build_and_sign.py --no-sign
+        run: python build_and_sign.py --no-sign --no-deploy
         env:
           DLTOOL_USE_SYSTEM_PYTHON: '1'
+          DLTOOL_VERSION: ${{ inputs.tag || github.ref_name }}
 
-      # 用 Python 而不是 PowerShell 收集产物：run 块会被写成临时 .ps1，而
       # 文件名全程 ASCII：Windows runner 的代码页会在上传环节丢掉中文，
       # 带中文的资产名会变成 default.exe / _.zip。理由见 tools/collect_artifacts.py。
       - name: 收集产物

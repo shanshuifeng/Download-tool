@@ -1,12 +1,22 @@
 # UTF-8
 #
-# 下载工具 版本信息资源
-# 由 PyInstaller --version-file 在打包时嵌入
+# 下载工具 版本资源**模板**
+#
+# 这是一个模板，不是成品：{VERSION} 与 {VERSION_TUPLE} 在打包时由
+# build_and_sign.py 按 git tag 替换，结果写到 build/version_info.generated.txt
+# 再交给 PyInstaller 的 --version-file。
+#
+# 为什么不在这个文件里写死版本号：同一个事实（当前是哪个版本）如果同时存在于
+# tag、这里、README、Release 名，就一定会有一处忘记改，而且没有任何机制能发现。
+# 版本号的唯一来源是 git tag，这里只描述「怎么呈现它」。
+#
+# 手工改这个文件时不要把具体数字写回来——tests/test_bugs.py 里有一条用例
+# 专门盯着这一点（版本号不得在模板中出现字面值）。
 #
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 2, 0, 0),
-    prodvers=(1, 2, 0, 0),
+    filevers=({VERSION_TUPLE}),
+    prodvers=({VERSION_TUPLE}),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -22,12 +32,12 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'shanshuifeng'),
             StringStruct('FileDescription', '下载工具 - 多线程分段下载器（界面 + 命令行）'),
-            StringStruct('FileVersion', '1.2.0.0'),
+            StringStruct('FileVersion', '{VERSION}'),
             StringStruct('InternalName', 'DownloadTool'),
             StringStruct('LegalCopyright', 'Copyright (C) 2026 shanshuifeng'),
             StringStruct('OriginalFilename', '下载工具.exe'),
             StringStruct('ProductName', '下载工具'),
-            StringStruct('ProductVersion', '1.2.0.0'),
+            StringStruct('ProductVersion', '{VERSION}'),
             StringStruct('Comments', '纯标准库多线程分段下载器。双击开界面，带参数即命令行；'
                                     '支持镜像测速、断点续传、哈希校验。')
           ]

@@ -27,6 +27,7 @@
 """
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,11 @@ WORK = os.path.join(tempfile.gettempdir(), "pyi_work")
 DIST = os.path.join(tempfile.gettempdir(), "pyi_dist")
 PFX = os.path.join(BUILD, "signing", "DownloadTool_SelfSigned.pfx")
 CER = os.path.join(BUILD, "signing", "DownloadTool_SelfSigned.cer")
+
+# 版本资源：模板入库，成品在打包时生成——版本号的唯一来源是 git tag
+VERSION_INFO_TEMPLATE = os.path.join(BUILD, "version_info.txt.in")
+VERSION_INFO_GENERATED = os.path.join(BUILD, "version_info.generated.txt")
+VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 # 口令只从环境变量取，仓库里不留任何口令
 PFX_PASSWORD = os.environ.get("DLTOOL_PFX_PASSWORD", "")
 MIRROR = "https://mirrors.aliyun.com/pypi/simple/"
@@ -52,6 +58,71 @@ DEPLOY = [
     os.path.join(os.path.expanduser("~"), "Desktop", "下载工具.exe"),
     os.path.join(PORTABLE, "下载工具.exe"),
 ]
+
+
+# ---------------- 版本号：唯一来源是 git tag ----------------
+#
+# 同一个事实若同时写在 tag、版本资源、README、Release 名里，就一定会有一处
+# 忘记改，而且没有机制能发现。所以版本号只在打标签时写一次，其余全部派生。
+
+
+def _norm_version(raw):
+    """把 v1.2.0 / 1.2.0 规范成三段式；不是三段数字就直接失败。"""
+    v = raw.strip()
+    if v[:1] in ("v", "V"):
+        v = v[1:]
+    if not VERSION_RE.match(v):
+        raise SystemExit(
+            f"版本号格式不对：{raw!r}。应为 v1.2.3 或 1.2.3（只接受三段数字）")
+    return v
+
+
+def _latest_tag():
+    """取最近的 tag；不在 git 仓库里、没有 tag、没有 git 命令都返回 None。"""
+    try:
+        out = subprocess.run(["git", "describe", "--tags", "--abbrev=0"],
+                             cwd=HERE, capture_output=True, text=True,
+                             timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip() or None
+
+
+def resolve_version(cli_value):
+    """按优先级取版本号：--version > DLTOOL_VERSION > 最近的 git tag。
+
+    CI 用环境变量传（tag 的 checkout 默认是浅克隆，`git describe` 未必拿得到），
+    本地直接靠 tag 就够了。
+    """
+    for raw, src in ((cli_value, "--version"),
+                     (os.environ.get("DLTOOL_VERSION"), "DLTOOL_VERSION"),
+                     (_latest_tag(), "最近的 git tag")):
+        if raw:
+            v = _norm_version(raw)
+            print(f"[3/6] 版本号 {v}（来源：{src}）")
+            return v
+    raise SystemExit(
+        "取不到版本号。请三选一：传 --version v1.2.3、"
+        "设 DLTOOL_VERSION=v1.2.3、或在打了 tag 的提交上构建")
+
+
+def render_version_info(version):
+    """按模板渲染版本资源，返回生成文件的路径。
+
+    模板用占位符而非具体数字：这样「当前是哪个版本」只存在于 tag 里。
+    """
+    if not os.path.isfile(VERSION_INFO_TEMPLATE):
+        raise SystemExit("缺少版本资源模板：" + VERSION_INFO_TEMPLATE)
+    major, minor, patch = version.split(".")
+    with open(VERSION_INFO_TEMPLATE, encoding="utf-8") as f:
+        text = f.read()
+    text = text.replace("{VERSION_TUPLE}", f"{major}, {minor}, {patch}, 0")
+    text = text.replace("{VERSION}", f"{version}.0")
+    with open(VERSION_INFO_GENERATED, "w", encoding="utf-8") as f:
+        f.write(text)
+    return VERSION_INFO_GENERATED
 
 
 def run(cmd, **kw):
@@ -99,13 +170,13 @@ def find_signtool():
 def ensure_venv():
     if os.environ.get("DLTOOL_USE_SYSTEM_PYTHON") == "1":
         # CI 等已自带 PyInstaller 的环境：直接用当前解释器，不再建虚拟环境
-        print("[2/5] 使用当前解释器的 PyInstaller:", sys.executable)
+        print("[2/6] 使用当前解释器的 PyInstaller:", sys.executable)
         return sys.executable
     py = os.path.join(VENV, "Scripts", "python.exe")
     if os.path.isfile(py):
-        print("[2/5] 复用已有构建环境")
+        print("[2/6] 复用已有构建环境")
         return py
-    print("[2/5] 创建构建环境并安装 PyInstaller")
+    print("[2/6] 创建构建环境并安装 PyInstaller")
     base = find_python313()
     print("  基础解释器:", base)
     run([base, "-m", "venv", VENV])
@@ -117,7 +188,7 @@ def ensure_venv():
 
 def check_all():
     """打包前跑契约校验与测试，坏代码不允许进 exe。"""
-    print("[1/5] 契约校验与测试")
+    print("[1/6] 契约校验与测试")
     py = find_python313()
     jobs = [
         ("契约校验", [py, os.path.join(HERE, "docs", "verify_contract.py")]),
@@ -136,8 +207,8 @@ def check_all():
             raise SystemExit(1)
 
 
-def build(py):
-    print("[3/5] 打包（含版本资源）")
+def build(py, version_info):
+    print("[4/6] 打包（含版本资源）")
     for d in (WORK, DIST):
         shutil.rmtree(d, ignore_errors=True)
 
@@ -146,7 +217,7 @@ def build(py):
          "--name", "DownloadTool",
          "--paths", SRC,
          "--icon", os.path.join(ASSETS, "icon.ico"),
-         "--version-file", os.path.join(BUILD, "version_info.txt"),
+         "--version-file", version_info,
          "--distpath", DIST, "--workpath", WORK, "--specpath", WORK,
          os.path.join(SRC, "gui.pyw")])
     exe = os.path.join(DIST, "DownloadTool.exe")
@@ -182,7 +253,7 @@ def kill_running_tool():
 
 
 def sign(exe, signtool):
-    print("[4/5] 签名")
+    print("[5/6] 签名")
     if not os.path.isfile(PFX):
         raise RuntimeError(f"证书不存在：{PFX}")
     if not PFX_PASSWORD:
@@ -256,7 +327,8 @@ def pack_portable(exe):
 
 
 def deploy(exe):
-    print("[5/5] 部署")
+    """把 exe 放到桌面 / 便携目录——只在本地跑，CI 不需要（用 --no-deploy 跳过）。"""
+    print("[6/6] 部署")
     os.makedirs(BUILD, exist_ok=True)
     os.makedirs(PORTABLE, exist_ok=True)   # 便携目录要先建，否则这轮会被跳过
     bak = os.path.join(BUILD, "_backup_" + __import__("datetime").date.today().strftime("%Y%m%d"))
@@ -273,7 +345,6 @@ def deploy(exe):
         print("  已部署:", t)
     print("  备份目录:", bak)
     prune_backups()
-    pack_portable(exe)
 
 
 def main():
@@ -283,7 +354,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-sign", action="store_true")
     ap.add_argument("--no-build", action="store_true")
-    ap.add_argument("--no-deploy", action="store_true")
+    ap.add_argument("--no-deploy", action="store_true",
+                    help="不往桌面/便携目录复制（CI 用；便携包仍会生成）")
+    ap.add_argument("--version", metavar="vX.Y.Z",
+                    help="版本号；缺省读 DLTOOL_VERSION，再缺省用最近的 git tag")
     ap.add_argument("--skip-checks", action="store_true",
                     help="跳过打包前的契约校验与测试")
     args = ap.parse_args()
@@ -293,16 +367,19 @@ def main():
 
     py = ensure_venv()
 
+    version = resolve_version(args.version)
+    version_info = render_version_info(version)
+
     if args.no_build:
         exe = os.path.join(DIST, "DownloadTool.exe")
         if not os.path.isfile(exe):
             raise SystemExit("dist 中没有现成 exe，请去掉 --no-build")
-        print("[3/5] 跳过打包，使用:", exe)
+        print("[4/6] 跳过打包，使用:", exe)
     else:
-        exe = build(py)
+        exe = build(py, version_info)
 
     if args.no_sign:
-        print("[4/5] 跳过签名")
+        print("[5/6] 跳过签名")
     else:
         st = find_signtool()
         if not st:
@@ -313,8 +390,11 @@ def main():
         except RuntimeError as e:
             raise SystemExit(f"签名失败：{e}")
 
+    # 便携包是发布必需的产物，与「要不要放到桌面」无关，所以先无条件打出来
+    pack_portable(exe)
+
     if args.no_deploy:
-        print("[5/5] 跳过部署，产物在:", exe)
+        print("[6/6] 跳过部署，产物在:", exe)
     else:
         deploy(exe)
 

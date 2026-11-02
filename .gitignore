@@ -49,3 +49,6 @@ desktop.ini
 
 # ===== 本机 agent 状态 =====
 .workbuddy/
+
+# 版本资源成品：由 build_and_sign.py 按 git tag 从 .in 模板生成，不入库
+build/version_info.generated.txt
